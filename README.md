@@ -5,7 +5,9 @@ Details on the analysis are provided in the associated publication:
 
 Kordilas M, Mumovic D, Schwartz Y, et al (2026a) Net benefits and burdens of PV battery storage systems in buildings: Lifecycle carbon and impacts beyond carbon under high temporal grid decarbonisation dynamics [under review]. Energy and Buildings
 
-The tools integrate the "Future_impacts_calculator" from BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories for the embodied impacts of the battery and the inverter in future years, which is described in https://github.com/kordilasm/BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories and peer reviewed in Marios Kordilas, Dejan Mumovic, Yair Schwartz, Rob Cooke, Smith Mordak, Zaid Chalabi, Temporal myopia in building Life Cycle Assessment? Granular versus coarse dynamics in climate change and grid decarbonisation, Building and Environment, Volume 295, 2026, 114419, ISSN 0360-1323, https://doi.org/10.1016/j.buildenv.2026.114419.
+The tools integrate the "Future_impacts_calculator" from BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories for the embodied impacts of the battery and the inverter in future years, which is described in https://github.com/kordilasm/BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories and peer reviewed in:
+
+Marios Kordilas, Dejan Mumovic, Yair Schwartz, Rob Cooke, Smith Mordak, Zaid Chalabi, Temporal myopia in building Life Cycle Assessment? Granular versus coarse dynamics in climate change and grid decarbonisation, Building and Environment, Volume 295, 2026, 114419, ISSN 0360-1323, https://doi.org/10.1016/j.buildenv.2026.114419.
 
 Files needed
 1. Future_impacts_calculator_Batteries folder
