@@ -1,7 +1,11 @@
 # BS-EN-15804-impacts-considering-building-level-battery-storage
 Open source Python tool for calculating the environmental impacts of building level PV battery storage across the whole impact spectrum of BS EN 15804:2012+A2:2019, under grid decarbonisation pathways and climate change. The battery embodied and operational impacts are calculated over a building's lifespan, assumed here 60 year as per RICS WLC (2025-2084), for three battery chemistries (LFP, NMC811, NCA) with replacement estimated via the capacity fade model of BLAST-Lite from NREL.
 
-The tools integrate the "Future_impacts_calculator" from BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories for the embodied impacts of the battery and the inverter in future years, which is described in https://github.com/kordilasm/BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories.
+Details on the analysis are provided in the associated publication:
+
+Kordilas M, Mumovic D, Schwartz Y, et al (2026a) Net benefits and burdens of PV battery storage systems in buildings: Lifecycle carbon and impacts beyond carbon under high temporal grid decarbonisation dynamics [under review]. Energy and Buildings
+
+The tools integrate the "Future_impacts_calculator" from BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories for the embodied impacts of the battery and the inverter in future years, which is described in https://github.com/kordilasm/BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories and peer reviewed in Marios Kordilas, Dejan Mumovic, Yair Schwartz, Rob Cooke, Smith Mordak, Zaid Chalabi, Temporal myopia in building Life Cycle Assessment? Granular versus coarse dynamics in climate change and grid decarbonisation, Building and Environment, Volume 295, 2026, 114419, ISSN 0360-1323, https://doi.org/10.1016/j.buildenv.2026.114419.
 
 Files needed
 1. Future_impacts_calculator_Batteries folder
@@ -72,8 +76,6 @@ BLAST-Lite capacity fade models:
 The battery is replaced when its relative capacity falls below the end of life capacity, assumed here 80% for S0 and S1, 70% for S2.
 
 Results are written to OUTPUT_FOLDER as Excel files named with the chemistry and sensitivity run (for MSC as impact_results_current_weather.xlsx, impact_results_future.xlsx, impact_results_fade_details.xlsx; for MILP as batch_optimization_.xlsx).
-
-Details on the pathways and scenario mapping are provided in the associated publication of the embodied_impacts_calculator tool: Marios Kordilas, Dejan Mumovic, Yair Schwartz, Rob Cooke, Smith Mordak, Zaid Chalabi, Temporal myopia in building Life Cycle Assessment? Granular versus coarse dynamics in climate change and grid decarbonisation, Building and Environment, Volume 295, 2026, 114419, ISSN 0360-1323, https://doi.org/10.1016/j.buildenv.2026.114419.
 
 Licenses:
 
