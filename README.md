@@ -1,1 +1,2 @@
 # BS-EN-15804-impacts-considering-building-level-battery-storage
+Open source Python tool for calculating the environmental impacts of building level PV battery storage across the BS EN 15804:2012+A2:2019 impact categories, under grid decarbonisation pathways and climate change weather files. The battery embodied impacts (A1-A3, A4, B4, C) and the operational impacts (B6, Module D) are calculated over a 60-year study period (2025-2084) for three battery chemistries (LFP, NMC811, NCA) with capacity fade and replacement calculated with BLAST-Lite.
