@@ -7,17 +7,9 @@ import math
 from pathlib import Path
 import re
 
-try:
-    from pyomo.environ import (ConcreteModel, Var, Constraint, Objective,
-                               minimize, Binary, NonNegativeReals, SolverFactory)
-    from pyomo.opt import TerminationCondition
-    import gurobipy
-    PYOMO_AVAILABLE = True
-    GUROBI_AVAILABLE = True
-except ImportError as e:
-    print(f"Pyomo/Gurobi import error: {e}")
-    PYOMO_AVAILABLE = False
-    GUROBI_AVAILABLE = False
+from pyomo.environ import (ConcreteModel, Var, Constraint, Objective,
+                           minimize, Binary, NonNegativeReals, SolverFactory)
+from pyomo.opt import TerminationCondition
 
 N_VARIABLE_YEARS = 26
 N_REPEATED_YEARS = 34
@@ -31,17 +23,12 @@ CYCLE_YEAR_COLS  = [f"Cycles {y}" for y in CYCLE_YEARS]
 
 class FutureImpactsCalculator:
 
-    def __init__(self, data_folder, verbose=True):
+    def __init__(self, data_folder):
         self.data_folder = Path(data_folder)
-        self.verbose = verbose
         self.load_all_data()
 
-    def _print(self, msg=""):
-        if self.verbose:
-            print(msg)
 
     def load_all_data(self):
-        self._print("Loading data files...")
 
         tech_impacts_path     = self.data_folder / "Impacts per MJ of technology inventory.xlsx"
         ng_eso_path           = self.data_folder / "National Grid ESO scenarios.xlsx"
@@ -63,13 +50,11 @@ class FutureImpactsCalculator:
                     impact_category_row = i
                     break
             if impact_category_row is None:
-                self._print(f"WARNING: Could not find 'Impact category' in sheet '{sheet}'")
                 continue
             headers = df_raw.iloc[impact_category_row].tolist()
             df_data = df_raw.iloc[impact_category_row + 1:].copy()
             df_data.columns = headers
             self.tech_impacts[sheet] = df_data
-        self._print(f"✓ Loaded {len(self.tech_impacts)} tech impact sheets")
 
         self.ng_eso_data = {}
         xl_ng = pd.ExcelFile(ng_eso_path)
@@ -176,7 +161,6 @@ class FutureImpactsCalculator:
             'LW': {'uk': 'LW', 'eu': 'CETO (ST_CT_LW)',   'iea': 'ASPTARGET', 'global': 'GLO (NZE)'}
         }
 
-        self._print("✓ Data loading complete\n")
 
     def build_region_mappings(self):
         self.country_to_ecoinvent_regions = {}
@@ -236,84 +220,72 @@ class FutureImpactsCalculator:
 
     def extract_regions_from_excel(self, subtract_filename="Impacts to subtract.xlsm"):
         impacts_subtract_path = self.data_folder / subtract_filename
-        try:
-            paste_df = pd.read_excel(impacts_subtract_path, sheet_name="Paste results here", header=None)
-            regions_data = []
-            for idx, row in paste_df.iterrows():
-                if pd.isna(row[1]):
-                    continue
-                process = str(row[1])
-                if 'market for electricity' in process:
-                    voltage_match = re.search(r'electricity, (high|medium|low) voltage', process, re.IGNORECASE)
-                    if voltage_match:
-                        voltage = voltage_match.group(1).lower()
-                        region_match = re.search(r'\{(.*?)\}', process)
-                        if region_match:
-                            region = region_match.group(1)
-                            base_region = region.split('-')[0].strip() if '-' in region else region
-                            amount = 0
-                            if len(row) > 4 and pd.notna(row[4]):
-                                try:
-                                    amount = float(row[4])
-                                except:
-                                    amount = 0
-                            regions_data.append({
-                                'region': region, 'base_region': base_region,
-                                'voltage': voltage, 'amount_mj': amount, 'process': process
-                            })
-            return regions_data
-        except Exception as e:
-            self._print(f"Error reading paste results: {e}")
-            return []
+        paste_df = pd.read_excel(impacts_subtract_path, sheet_name="Paste results here", header=None)
+        regions_data = []
+        for idx, row in paste_df.iterrows():
+            if pd.isna(row[1]):
+                continue
+            process = str(row[1])
+            if 'market for electricity' in process:
+                voltage_match = re.search(r'electricity, (high|medium|low) voltage', process, re.IGNORECASE)
+                if voltage_match:
+                    voltage = voltage_match.group(1).lower()
+                    region_match = re.search(r'\{(.*?)\}', process)
+                    if region_match:
+                        region = region_match.group(1)
+                        base_region = region.split('-')[0].strip() if '-' in region else region
+                        amount = 0
+                        if len(row) > 4 and pd.notna(row[4]):
+                            try:
+                                amount = float(row[4])
+                            except:
+                                amount = 0
+                        regions_data.append({
+                            'region': region, 'base_region': base_region,
+                            'voltage': voltage, 'amount_mj': amount, 'process': process
+                        })
+        return regions_data
 
     def read_subtract_totals(self, subtract_filename="Impacts to subtract.xlsm"):
         impacts_subtract_path = self.data_folder / subtract_filename
-        try:
-            subtract_df = pd.read_excel(impacts_subtract_path, sheet_name="Subtract sum")
-            subtract_totals = {}
-            for idx, row in subtract_df.iterrows():
-                impact_cat = None
-                if 'Impact categories' in subtract_df.columns:
-                    impact_cat = row['Impact categories']
-                elif 'Impact category' in subtract_df.columns:
-                    impact_cat = row['Impact category']
-                if pd.notna(impact_cat):
-                    value = None
-                    if 'TOTAL TO SUBTRACT' in subtract_df.columns:
-                        value = row['TOTAL TO SUBTRACT']
-                    elif any('subtract' in str(col).lower() for col in subtract_df.columns):
-                        for col in subtract_df.columns:
-                            if 'subtract' in str(col).lower():
-                                value = row[col]
-                                break
-                    if pd.notna(value):
-                        subtract_totals[str(impact_cat).strip()] = float(value)
-            return subtract_totals
-        except Exception as e:
-            self._print(f"Error reading subtract totals: {e}")
-            return {}
+        subtract_df = pd.read_excel(impacts_subtract_path, sheet_name="Subtract sum")
+        subtract_totals = {}
+        for idx, row in subtract_df.iterrows():
+            impact_cat = None
+            if 'Impact categories' in subtract_df.columns:
+                impact_cat = row['Impact categories']
+            elif 'Impact category' in subtract_df.columns:
+                impact_cat = row['Impact category']
+            if pd.notna(impact_cat):
+                value = None
+                if 'TOTAL TO SUBTRACT' in subtract_df.columns:
+                    value = row['TOTAL TO SUBTRACT']
+                elif any('subtract' in str(col).lower() for col in subtract_df.columns):
+                    for col in subtract_df.columns:
+                        if 'subtract' in str(col).lower():
+                            value = row[col]
+                            break
+                if pd.notna(value):
+                    subtract_totals[str(impact_cat).strip()] = float(value)
+        return subtract_totals
 
     def read_simapro_impacts(self, simapro_filename="SimaPro impacts.xlsx"):
         simapro_path = self.data_folder / simapro_filename
-        try:
-            simapro_df = pd.read_excel(simapro_path, sheet_name="Sheet1")
-            simapro_impacts = {}
-            for idx, row in simapro_df.iterrows():
-                impact_cat = row['Impact category']
-                if pd.notna(impact_cat):
-                    value = None
-                    for col in simapro_df.columns:
-                        if col not in ('Impact category', 'Unit'):
-                            val = row[col]
-                            if pd.notna(val):
-                                value = float(val)
-                                break
-                    if value is not None:
-                        simapro_impacts[str(impact_cat).strip()] = value
-            return simapro_impacts
-        except Exception as e:
-            self._print(f"Error reading SimaPro impacts: {e}")
-            return {}
+        simapro_df = pd.read_excel(simapro_path, sheet_name="Sheet1")
+        simapro_impacts = {}
+        for idx, row in simapro_df.iterrows():
+            impact_cat = row['Impact category']
+            if pd.notna(impact_cat):
+                value = None
+                for col in simapro_df.columns:
+                    if col not in ('Impact category', 'Unit'):
+                        val = row[col]
+                        if pd.notna(val):
+                            value = float(val)
+                            break
+                if value is not None:
+                    simapro_impacts[str(impact_cat).strip()] = value
+        return simapro_impacts
 
     def get_nearest_year(self, target_year, available_years):
         numeric_years = []
@@ -889,22 +861,6 @@ def set_battery_chemistry(name: str):
 set_battery_chemistry("LFP")
 
 
-def check_inventory_data():
-    tables = {
-        "A1-A3 (battery)": list(a1a3_factors.values()),
-        "B4 BASELINE (battery)": b4_factors["BASELINE"],
-        "C BASELINE (battery)": c_factors["BASELINE"],
-        "A4 ship": a4_ship_baseline,
-        "A4 road BASELINE": a4_road_factors_baseline,
-        "A1-A3 (inverter)": inverter_a1a3_per_unit,
-        "C BASELINE (inverter)": inverter_c_baseline_per_unit,
-    }
-    missing = [k for k, v in tables.items() if any(x == "add value" for x in v)]
-    if missing:
-        raise SystemExit("Inventory values missing for: " + ", ".join(missing) +
-                         ". Replace each 'add value' with the inventory value as described in the README.")
-
-
 a4_ship_baseline = [
     "add value", "add value", "add value", "add value", "add value",
     "add value", "add value", "add value", "add value", "add value",
@@ -951,10 +907,7 @@ _future_impacts_cache: dict = {}
 def initialize_future_calculator(batteries_folder: str):
     global _battery_future_calculator
     if _battery_future_calculator is None:
-        print(f"\nInitialising FutureImpactsCalculator for battery A4 road/B4/C...")
-        print(f"  Folder: {batteries_folder}")
-        _battery_future_calculator = FutureImpactsCalculator(batteries_folder, verbose=False)
-        print("  ✓ Calculator ready\n")
+        _battery_future_calculator = FutureImpactsCalculator(batteries_folder)
 
 
 def _get_future_module_per_kg(year: int, scenario: str, module: str) -> dict:
@@ -1127,13 +1080,8 @@ except Exception:
     sys.modules["h5pyd"] = types.ModuleType("h5pyd")
 if not hasattr(np, "trapz"):
     np.trapz = np.trapezoid
-try:
-    from blast import models as blast_models
-    from blast.utils.rainflow import extract_cycles as blast_extract_cycles
-    BLAST_AVAILABLE = True
-except Exception as e:
-    print(f"BLAST-Lite import error: {e}")
-    BLAST_AVAILABLE = False
+from blast import models as blast_models
+from blast.utils.rainflow import extract_cycles as blast_extract_cycles
 
 
 def set_fade_model(chemistry: str, index: int = 0):
@@ -1226,9 +1174,6 @@ class BatteryFade:
                     prior = bp
                     if self._eol_time is None and not (self.q() >= FADE_EOL):
                         self._eol_time = float(y + t_secs[bp] / t_secs[-1])
-        if not np.isfinite(self.q()) or self.q() <= 0:
-            print(f"    WARNING: BLAST-Lite returned a relative capacity of {self.q():.4g} in "
-                  f"{STUDY_START_YEAR + y} (battery {len(self.installs)}); results for this case are not valid")
         st = self.cell.states
         loss_time  = sum(float(v[-1]) for k, v in st.items() if k.startswith('qLoss') and k.endswith('_t'))
         loss_cycle = sum(float(v[-1]) for k, v in st.items() if k.startswith('qLoss') and not k.endswith('_t'))
@@ -1255,7 +1200,6 @@ def get_fade_model_choice(chemistry):
         choice = input(f"Enter choice (1-{len(options)}): ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(options):
             return int(choice) - 1
-        print(f"Please enter a number between 1 and {len(options)}")
 
 
 def get_fade_runs():
@@ -1271,7 +1215,6 @@ def get_fade_runs():
         picks = ["1", "2", "3", "4"] if entry == "" else [p.strip() for p in entry.split(",")]
         if picks and all(p in ("1", "2", "3", "4") for p in picks):
             break
-        print("Please enter numbers between 1 and 4")
 
     runs = []
     if "1" in picks:
@@ -1293,7 +1236,6 @@ def get_fade_runs():
                     break
             except ValueError:
                 pass
-            print("Please enter a number between 0 and 100")
         runs.append({'tag': f"S2_EOL{eol * 100:g}", 'scalar': 1.0, 'eol': eol, 'sensitivity': True})
     if "4" in picks:
         runs.append({'tag': f"S3_eff{FADE_S3_EFFICIENCY * 100:g}", 'scalar': 1.0, 'eol': FADE_EOL_DEFAULT,
@@ -1316,7 +1258,6 @@ def _pick_from_list(title, items, show=str):
                 if items[int(p) - 1] not in chosen:
                     chosen.append(items[int(p) - 1])
             return chosen
-        print(f"Please enter numbers between 1 and {len(items)}")
 
 
 def get_sensitivity_scope(scenarios, weather_cases, impact_labels):
@@ -1458,8 +1399,6 @@ def optimise_year_milp(needs_data, grid_impacts_data, impact_index,
                                                    scenario_type, time_period, use_solver_options,
                                                    battery_capacity, annual_embodied_impact=0,
                                                    return_soc=False, initial_soc_kwh=None):
-    if not PYOMO_AVAILABLE or not GUROBI_AVAILABLE:
-        raise ImportError("Pyomo and Gurobi are required")
 
     if battery_capacity == 0:
         return (pd.Series(calculate_net_grid_import_without_battery(needs_data)), 0,
@@ -1527,8 +1466,6 @@ def optimise_year_milp(needs_data, grid_impacts_data, impact_index,
                 TerminationCondition.maxTimeLimit)
     if tc not in accepted or model.grid_import[0].value is None:
         raise RuntimeError(f"Gurobi failed at {battery_capacity:.1f} kWh: {tc}")
-    if tc == TerminationCondition.maxTimeLimit:
-        print(f"  NOTE: time limit hit at {battery_capacity:.1f} kWh; best incumbent used")
 
     optimized = []
     charges, discharges = [], []
@@ -1589,7 +1526,6 @@ def optimise_all_years_with_fade(needs_data, impacts_df, impact_index, capacity,
 def optimise_capacity_sweep(needs_data, grid_impacts_data, impact_index,
                                          scenario_type, time_period, use_solver_options,
                                          electricity_scenario, avg_demand, extra_needs=None):
-    print(f"  Testing 25 capacities...")
 
     capacities_to_test = [i * avg_demand for i in range(0, 25)]
 
@@ -1625,7 +1561,6 @@ def optimise_capacity_sweep(needs_data, grid_impacts_data, impact_index,
                 battery_mass, electricity_scenario, None, install_times=installs,
                 inverter_kw=test_capacity / BATTERY_DURATION_H)
             emb_total = embodied['total'][labels[impact_index]]
-            print(f"    {hours:.0f} h ({test_capacity:.1f} kWh): {len(installs)} batteries")
 
         operational_all   = calculate_current_impacts_by_year(
             imports_by_year, grid_impacts_data)
@@ -1654,9 +1589,6 @@ def optimise_capacity_sweep(needs_data, grid_impacts_data, impact_index,
             best_cycles       = mean_cycles
             best_grid_imports = imports_by_year
 
-    print(f"  Optimal capacity: {best_capacity:.1f} kWh "
-          f"({best_capacity / avg_demand:.1f}h storage)")
-    print(f"  Minimum 60-year impact: {best_impact:.1f}")
 
     return best_grid_imports, best_cycles, best_capacity, all_test_results
 
@@ -1669,12 +1601,6 @@ EXCLUDED_IMPACTS = [
 
 
 def run_optimisation(electricity_scenario, use_solver_options, weather="current", impact_filter=None):
-    print(f"\n=== STARTING OPTIMISATION for {electricity_scenario} ===")
-    print(f"Battery type: {BATTERY_CHEMISTRY}  |  {BATTERY_KG_PER_KWH} kg/kWh  |  "
-          f"{BATTERY_EFFICIENCY * 100:.1f}% eff  |  {BATTERY_DOD * 100:.0f}% DOD")
-    print(f"Capacity fade: {FADE_MODEL_NAME}  |  degradation scalar {FADE_SCALAR:.2f}  |  "
-          f"end of life {FADE_EOL * 100:g}%  |  {FADE_TEMPERATURE_C:g} C")
-    print(f"Weather: {weather}")
 
     excluded_impacts = EXCLUDED_IMPACTS
 
@@ -1683,7 +1609,6 @@ def run_optimisation(electricity_scenario, use_solver_options, weather="current"
         impact_indices_to_optimize = [i for i in impact_indices_to_optimize if labels[i] in impact_filter]
     impact_labels_to_optimize  = [labels[i] for i in impact_indices_to_optimize]
 
-    print(f"Optimising {len(impact_indices_to_optimize)} impact categories")
 
     if weather == "current":
         needs_current = safe_load_needs(needs_file_current, "current")
@@ -1699,7 +1624,6 @@ def run_optimisation(electricity_scenario, use_solver_options, weather="current"
 
     for idx, impact_idx in enumerate(impact_indices_to_optimize):
         label = impact_labels_to_optimize[idx]
-        print(f"\n[{idx + 1}/{len(impact_indices_to_optimize)}] Optimising: {label}")
 
         grid_import_current, total_cycle_count, optimal_capacity, all_test_results = \
             optimise_capacity_sweep(
@@ -1714,9 +1638,7 @@ def run_optimisation(electricity_scenario, use_solver_options, weather="current"
             'optimal_capacity': optimal_capacity,
             'all_test_results': all_test_results
         }
-        print(f"  Optimal capacity: {optimal_capacity:.1f} kWh")
 
-    print(f"\n=== OPTIMISATION COMPLETE for {electricity_scenario} ===")
     return batch_results, impact_labels_to_optimize, avg_demand_current
 
 
@@ -1815,7 +1737,6 @@ def save_results(batch_results, impact_labels, electricity_scenario, avg_demand_
                 ]
             )
             df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"  Saved sheet: {sheet_name}")
 
         summary_data = []
         for label in impact_labels:
@@ -1829,7 +1750,6 @@ def save_results(batch_results, impact_labels, electricity_scenario, avg_demand_
                     'Annual Cycles':            r['cycles'] if r['cycles'] > 0 else 0
                 })
         pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
-        print("  Saved sheet: Summary")
 
     fade_rows = []
     for label in impact_labels:
@@ -1842,7 +1762,6 @@ def save_results(batch_results, impact_labels, electricity_scenario, avg_demand_
     pd.DataFrame(fade_rows, columns=['Impact category optimised', 'Capacity (kWh)',
                  'Hours of avg demand'] + FADE_DETAIL_COLUMNS
                  ).to_excel(fade_file, sheet_name="Capacity fade", index=False)
-    print(f"  Saved fade details: {fade_file}")
 
     return output_file
 
@@ -1856,7 +1775,6 @@ def get_battery_chemistry_choice():
         choice = input(f"Enter choice (1-{len(names)}): ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(names):
             return names[int(choice) - 1]
-        print(f"Please enter a number between 1 and {len(names)}")
 
 
 def get_weather_choice():
@@ -1868,7 +1786,6 @@ def get_weather_choice():
         choice = input("Enter choice (1-3): ").strip()
         if choice in ("1", "2", "3"):
             break
-        print("Please enter 1, 2 or 3")
     if choice == "1":
         return ["current"]
     future = {"1": ["medium"], "2": ["high"], "3": ["medium", "high"]}
@@ -1880,7 +1797,6 @@ def get_weather_choice():
         sub = input("Enter choice (1-3): ").strip()
         if sub in future:
             break
-        print("Please enter 1, 2 or 3")
     return (["current"] if choice == "3" else []) + future[sub]
 
 
@@ -1889,7 +1805,6 @@ def get_solver_options_choice():
         c = input("Use solver time limits and optimality gap? (yes/no): ").strip().lower()
         if c in ('yes', 'y', 'no', 'n'):
             return c in ('yes', 'y')
-        print("Please enter 'yes' or 'no'")
 
 
 def get_scenario_selection():
@@ -1910,7 +1825,6 @@ def get_scenario_selection():
             valid  = True
             for sel in selections:
                 if not sel.isdigit() or not (1 <= int(sel) <= 5):
-                    print(f"Invalid: '{sel}'.  Enter numbers 1-5.")
                     valid = False
                     break
                 name = all_scenarios[int(sel) - 1]
@@ -1920,27 +1834,11 @@ def get_scenario_selection():
                 label = chosen[0] if len(chosen) == 1 else f"SELECTED_{len(chosen)}"
                 return label, chosen
         except ValueError:
-            print("Please enter valid numbers.")
+            pass
 
 
 def main():
-    print("=" * 60)
-    print("BATTERY DISPATCH OPTIMISATION (MILP) - CURRENT AND FUTURE WEATHER")
-    print("Per-year dispatch optimisation with capacity fade (BLAST-Lite); dynamic A4/B4/C via FutureImpactsCalculator")
-    print("=" * 60)
-    print(f"Pyomo: {PYOMO_AVAILABLE}  |  Gurobi: {GUROBI_AVAILABLE}")
-
-    if not PYOMO_AVAILABLE or not GUROBI_AVAILABLE:
-        print("ERROR: Pyomo and Gurobi are both required.")
-        return
-
-    if not BLAST_AVAILABLE:
-        print("ERROR: BLAST-Lite is required (capacity fade).")
-        return
-
     set_battery_chemistry(get_battery_chemistry_choice())
-
-    check_inventory_data()
     set_fade_model(BATTERY_CHEMISTRY, get_fade_model_choice(BATTERY_CHEMISTRY))
     electricity_scenario, scenarios_to_run = get_scenario_selection()
     weather_cases = get_weather_choice()
@@ -1960,54 +1858,20 @@ def main():
         batteries_folder = "/Users/yourname/Downloads/Future_impacts_calculator_Batteries/"
         initialize_future_calculator(batteries_folder)
 
-    print(f"\nConfiguration:")
-    print(f"  Scenarios : {', '.join(scenarios_to_run)}")
-    print(f"  Battery   : {BATTERY_CHEMISTRY}  ({BATTERY_KG_PER_KWH} kg/kWh, "
-          f"{BATTERY_EFFICIENCY * 100:.1f}% eff, {BATTERY_DOD * 100:.0f}% DOD)")
-    print(f"  Weather   : {', '.join(weather_cases)}")
-    print(f"  Capacity fade: {FADE_MODEL_NAME}, {FADE_TEMPERATURE_C:g} C")
-    print(f"  Runs      : {', '.join(r['tag'] for r in runs)}")
-    if any(r['sensitivity'] for r in runs):
-        print(f"  S1-S3 on  : {', '.join(f'{s}/{w}' for s, w in sens_combos)}; "
-              f"{'all optimised categories' if sens_labels is None else ', '.join(sens_labels)}")
-    print(f"  Solver options: {use_solver_options}")
-    print(f"  Capacities tested: 0-24 hours of average demand (25 tests)")
-    print(f"  Threads per solve: {SOLVER_THREADS}")
-    print(f"  B4/C method: "
-          f"{'FutureImpactsCalculator (year-specific per replacement)' if non_baseline_scenarios else 'Hardcoded (BASELINE only)'}")
-
-    total_start = pd.Timestamp.now()
-    print(f"\nStarted: {total_start.strftime('%Y-%m-%d %H:%M:%S')}")
 
     for run in runs:
         set_fade_run(run['scalar'], run['eol'], run.get('efficiency'))
-        print(f"\n{'#' * 60}\nRUN {run['tag']}: degradation scalar {run['scalar']:.2f}, "
-              f"end of life {run['eol'] * 100:g}%, round-trip efficiency {BATTERY_EFFICIENCY * 100:g}%\n{'#' * 60}")
 
         for scenario in scenarios_to_run:
-            t0 = pd.Timestamp.now()
-            print(f"\n{'=' * 60}\nPROCESSING: {scenario}  (started {t0.strftime('%H:%M:%S')})\n{'=' * 60}")
-
             for weather in weather_cases:
                 if run['sensitivity'] and (scenario, weather) not in sens_combos:
                     continue
-                t1 = pd.Timestamp.now()
                 batch_results, impact_labels, avg_demand = run_optimisation(
                     scenario, use_solver_options, weather,
                     sens_labels if run['sensitivity'] else None)
 
-                output_file = save_results(
+                save_results(
                     batch_results, impact_labels, scenario, avg_demand, weather, run['tag'])
-
-                duration = (pd.Timestamp.now() - t1).total_seconds() / 60
-                print(f"  Saved: {output_file}")
-                print(f"  {scenario} / {weather} completed in {duration:.1f} min")
-
-    total_duration = (pd.Timestamp.now() - total_start).total_seconds() / 60
-    print(f"\n{'=' * 60}")
-    print(f"ALL DONE — total time: {total_duration:.1f} min")
-    print(f"Ended: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
 
 
 if __name__ == "__main__":
