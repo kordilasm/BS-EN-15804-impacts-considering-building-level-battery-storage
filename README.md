@@ -85,8 +85,6 @@ ISO 3166 country codes can be accessed here https://www.iso.org/obp/ui/#search
 
 Ecoinvent geographies file can be accessed here https://support.ecoinvent.org/geographies
 
-BLAST-Lite copyright and license
-
 The capacity fade models are from BLAST-Lite (https://github.com/NatLabRockies/BLAST-Lite), which is used under the following license:
 
 Copyright (c) 2023, Alliance for Energy Innovation, LLC
