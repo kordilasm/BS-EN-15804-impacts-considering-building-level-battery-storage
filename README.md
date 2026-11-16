@@ -54,7 +54,6 @@ Workflow:
 - the BLAST-Lite capacity fade model of the selected chemistry
 - the electricity scenarios and weather cases
 - the sensitivity runs: S0 (default settings), S1 (BLAST degradation scalar), S2 (end-of-life capacity) and S3 (round-trip efficiency)
-Results are written to OUTPUT_FOLDER (MSC script: impact_results_current_weather*.xlsx, impact_results_future*.xlsx and impact_results_fade_details*.xlsx; MILP script: batch_optimisation_*.xlsx).
 
 BLAST-Lite capacity fade models:
 1. For LFP: Sony-Murata 3 Ah LFP-Gr & 250 Ah prismatic LFP-Gr
