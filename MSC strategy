@@ -1,0 +1,2266 @@
+import pandas as pd
+import string
+import os
+import numpy as np
+from openpyxl.utils import column_index_from_string
+import math
+from pathlib import Path
+import re
+
+base_path = "/Users/yourname/Downloads/hourly files/"
+OUTPUT_FOLDER = "/Users/yourname/Downloads/"
+NEEDS_FILE_NAME = "QPR hourly needs.xlsx"
+needs_file_current = os.path.join(base_path, NEEDS_FILE_NAME)
+needs_file_future  = os.path.join(base_path, NEEDS_FILE_NAME)
+
+scenario_files = {
+    "BASELINE": "BASELINE2 hourly_impacts.xlsx",
+    "FS":       "FS2 hourly_impacts.xlsx",
+    "ST":       "ST2 hourly_impacts.xlsx",
+    "CT":       "CT2 hourly_impacts.xlsx",
+    "LW":       "LW2 hourly_impacts.xlsx"
+}
+
+labels = [
+    "Acidification", "Climate change", "Climate change - Biogenic", "Climate change - Fossil",
+    "Climate change - Land use and LU change", "Ecotoxicity, freshwater", "Ecotoxicity, freshwater - inorganics",
+    "Ecotoxicity, freshwater - organics", "Particulate matter", "Eutrophication, marine",
+    "Eutrophication, freshwater", "Eutrophication, terrestrial", "Human toxicity, cancer",
+    "Human toxicity, cancer - inorganics", "Human toxicity, cancer - organics", "Human toxicity, non-cancer",
+    "Human toxicity, non-cancer - inorganics", "Human toxicity, non-cancer - organics", "Ionising radiation",
+    "Land use", "Ozone depletion", "Photochemical ozone formation", "Resource use, fossils",
+    "Resource use, minerals and metals", "Water use"
+]
+
+HOURS_PER_YEAR = 8760
+
+STUDY_START_YEAR = 2025
+STUDY_END_YEAR   = 2085
+CYCLE_YEARS      = list(range(2025, 2051))
+CYCLE_YEARS_FUT  = list(range(2025, 2085))
+
+BATTERIES_FOLDER = "/Users/yourname/Downloads/Future_impacts_calculator_Batteries/"
+
+
+class FutureImpactsCalculator:
+
+    def __init__(self, data_folder, verbose=True):
+        self.data_folder = Path(data_folder)
+        self.verbose = verbose
+        self.load_all_data()
+
+    def _print(self, msg=""):
+        if self.verbose:
+            print(msg)
+
+    def load_all_data(self):
+        self._print("Loading data files...")
+
+        tech_impacts_path     = self.data_folder / "Impacts per MJ of technology inventory.xlsx"
+        ng_eso_path           = self.data_folder / "National Grid ESO scenarios.xlsx"
+        eu_path               = self.data_folder / "EU future impacts_for python.xlsx"
+        iea_shares_path       = self.data_folder / "IEA_Generation_Shares.xlsx"
+        iea_weo_shares_path   = self.data_folder / "IEA_WEO_Generation_Shares_Regions.xlsx"
+        iea_global_path       = self.data_folder / "IEA GLO future impacts_for python.xlsx"
+        ar6_path              = self.data_folder / "AR6_Electricity_Shares for ISO countries.csv"
+        eco_path              = self.data_folder / "Ecoinvent geographies.xlsx"
+        iso_path              = self.data_folder / "ISO 3166 geographies.xlsx"
+
+        self.tech_impacts = {}
+        xl_tech = pd.ExcelFile(tech_impacts_path)
+        for sheet in xl_tech.sheet_names:
+            df_raw = xl_tech.parse(sheet, header=None)
+            impact_category_row = None
+            for i in range(min(10, len(df_raw))):
+                if df_raw.iloc[i, 0] == 'Impact category':
+                    impact_category_row = i
+                    break
+            if impact_category_row is None:
+                self._print(f"WARNING: Could not find 'Impact category' in sheet '{sheet}'")
+                continue
+            headers = df_raw.iloc[impact_category_row].tolist()
+            df_data = df_raw.iloc[impact_category_row + 1:].copy()
+            df_data.columns = headers
+            self.tech_impacts[sheet] = df_data
+        self._print(f"✓ Loaded {len(self.tech_impacts)} tech impact sheets")
+
+        self.ng_eso_data = {}
+        xl_ng = pd.ExcelFile(ng_eso_path)
+        for sheet in xl_ng.sheet_names:
+            self.ng_eso_data[sheet] = xl_ng.parse(sheet)
+
+        self.eu_data = {}
+        xl_eu = pd.ExcelFile(eu_path)
+        for sheet in xl_eu.sheet_names:
+            self.eu_data[sheet] = xl_eu.parse(sheet)
+
+        self.iea_shares = {}
+        xl_iea = pd.ExcelFile(iea_shares_path)
+        for sheet in xl_iea.sheet_names:
+            df = xl_iea.parse(sheet, index_col=0)
+            self.iea_shares[sheet] = df
+
+        self.iea_weo_shares = {}
+        xl_weo = pd.ExcelFile(iea_weo_shares_path)
+        for sheet in xl_weo.sheet_names:
+            df = xl_weo.parse(sheet)
+            if 'Technology_Formatted' in df.columns:
+                df = df.set_index('Technology_Formatted')
+            self.iea_weo_shares[sheet] = df
+
+        self.iea_global = {}
+        xl_global = pd.ExcelFile(iea_global_path)
+        for sheet in xl_global.sheet_names:
+            self.iea_global[sheet] = xl_global.parse(sheet)
+
+        self.ar6_data    = pd.read_csv(ar6_path)
+        self.geographies = pd.read_excel(eco_path, sheet_name="Geographies")
+        self.build_region_mappings()
+
+        iso_df = pd.read_excel(iso_path, header=None)
+        self.country_name_to_code = dict(zip(iso_df[0], iso_df[1]))
+        self.code_to_country_name = dict(zip(iso_df[1], iso_df[0]))
+
+        self.transmission_impacts = {
+            'Acidification': 2.42e-04 / 3.6,
+            'Climate change': 0.005715102 / 3.6,
+            'Climate change - Biogenic': -4.20e-05 / 3.6,
+            'Climate change - Fossil': 0.005750229 / 3.6,
+            'Climate change - Land use and LU change': 6.88e-06 / 3.6,
+            'Ecotoxicity, freshwater': 0.311998558 / 3.6,
+            'Ecotoxicity, freshwater - inorganics': 0.302320834 / 3.6,
+            'Ecotoxicity, freshwater - organics': 0.009677731 / 3.6,
+            'Particulate matter': 7.11e-10 / 3.6,
+            'Eutrophication, marine': 1.39e-05 / 3.6,
+            'Eutrophication, freshwater': 1.86e-05 / 3.6,
+            'Eutrophication, terrestrial': 1.86e-04 / 3.6,
+            'Human toxicity, cancer': 7.10e-11 / 3.6,
+            'Human toxicity, cancer - inorganics': 2.47e-11 / 3.6,
+            'Human toxicity, cancer - organics': 4.63e-11 / 3.6,
+            'Human toxicity, non-cancer': 2.53e-09 / 3.6,
+            'Human toxicity, non-cancer - inorganics': 2.39e-09 / 3.6,
+            'Human toxicity, non-cancer - organics': 1.48e-10 / 3.6,
+            'Ionising radiation': 3.63e-04 / 3.6,
+            'Land use': 9.68e-02 / 3.6,
+            'Ozone depletion': 1.21e-10 / 3.6,
+            'Photochemical ozone formation': 5.40e-05 / 3.6,
+            'Resource use, fossils': 0.061473079 / 3.6,
+            'Resource use, minerals and metals': 3.20e-06 / 3.6,
+            'Water use': 3.91e-03 / 3.6
+        }
+
+        self.tech_mapping = {
+            'Nuclear': 'Nuclear - PWR', 'Coal': 'Coal', 'Lignite': 'Lignite',
+            'Natural gas & biogas': 'Gas', 'Derived gas': 'Gas', 'Refinery gas': 'Gas',
+            'Diesel oil': 'Oil', 'Fuel Oil': 'Oil', 'Solid biomass & waste': 'Biofuels',
+            'Fuel cells': 'Hydrogen', 'Onshore': 'Wind - onshore', 'Offshore': 'Wind - offshore',
+            'Solar photovoltaics': 'Solar', 'Solar thermal': 'Solar - thermal',
+            'Geothermal': 'Geothermal', 'Hydro': 'Hydro - reservoir',
+            'Pumped hydro': 'Hydro - pumped', 'Batteries': 'Compressed air',
+            'Gas': 'Gas', 'Oil': 'Oil', 'Biofuels': 'Biofuels',
+            'Wind onshore': 'Wind - onshore', 'Wind offshore': 'Wind - offshore',
+            'Solar PV': 'Solar', 'Solar CSP': 'Solar - thermal',
+            'Hydroelectric': 'Hydro - reservoir', 'Nuclear power': 'Nuclear - PWR',
+            'Hydropower': 'Hydro - reservoir', 'Wind power': 'Wind - onshore',
+            'Solar power': 'Solar', 'Coal without CCS': 'Coal', 'Gas without CCS': 'Gas',
+            'Coal with CCS': 'Coal', 'Gas with CCS': 'Gas',
+        }
+
+        self.ar6_tech_mapping = {
+            'Secondary Energy|Electricity|Biomass': 'Biofuels',
+            'Secondary Energy|Electricity|Coal': 'Coal',
+            'Secondary Energy|Electricity|Gas': 'Gas',
+            'Secondary Energy|Electricity|Hydro': 'Hydro - reservoir',
+            'Secondary Energy|Electricity|Nuclear': 'Nuclear - PWR',
+            'Secondary Energy|Electricity|Solar|PV': 'Solar',
+            'Secondary Energy|Electricity|Solar': 'Solar',
+            'Secondary Energy|Electricity|Solar|CSP': 'Solar - thermal',
+            'Secondary Energy|Electricity|Wind|Offshore': 'Wind - offshore',
+            'Secondary Energy|Electricity|Wind|Onshore': 'Wind - onshore',
+            'Secondary Energy|Electricity|Geothermal': 'Geothermal',
+            'Secondary Energy|Electricity|Ocean': None
+        }
+
+        self.scenario_mapping = {
+            'FS': {'uk': 'FS', 'eu': 'CENTRAL (FS)',      'iea': 'BAU',       'global': 'GLO (BAU)'},
+            'ST': {'uk': 'ST', 'eu': 'CETO (ST_CT_LW)',   'iea': 'STEPS',     'global': 'GLO (STEPS)'},
+            'CT': {'uk': 'CT', 'eu': 'CETO (ST_CT_LW)',   'iea': 'STEPS',     'global': 'GLO (STEPS)'},
+            'LW': {'uk': 'LW', 'eu': 'CETO (ST_CT_LW)',   'iea': 'ASPTARGET', 'global': 'GLO (NZE)'}
+        }
+
+        self._print("✓ Data loading complete\n")
+
+    def build_region_mappings(self):
+        self.country_to_ecoinvent_regions = {}
+        self.ecoinvent_region_countries   = {}
+        for idx, row in self.geographies.iterrows():
+            region_name = row['Name']
+            contained   = row['Contained and Overlapping Geographies']
+            if pd.notna(contained):
+                countries = [c.strip() for c in str(contained).split(';')]
+                self.ecoinvent_region_countries[region_name] = countries
+                for country in countries:
+                    if country not in self.country_to_ecoinvent_regions:
+                        self.country_to_ecoinvent_regions[country] = []
+                    self.country_to_ecoinvent_regions[country].append(region_name)
+
+    def clean_region_name(self, name):
+        if not isinstance(name, str):
+            return ""
+        name = name.lower()
+        for word in ['rest of ', 'rest-of-', 'without', 'w/o', 'region', 'un ',
+                     'subregion', 'commonwealth of independent states', 'free trade agreement']:
+            name = name.replace(word, '')
+        name = name.replace(' and ', ' & ').replace(' & ', ' and ')
+        return name.strip()
+
+    def regions_match(self, eco_name, weo_name):
+        eco_name = eco_name.lower()
+        weo_name = weo_name.lower()
+        if eco_name == weo_name:
+            return True
+        if '(' in eco_name and ')' in eco_name:
+            eco_country = eco_name.split('(')[0].strip()
+            weo_country = weo_name.split('(')[0].strip()
+            if eco_country and weo_country and eco_country == weo_country:
+                return True
+        known_mappings = {
+            'russia': 'russia', 'russia (europe)': 'russia', 'russia (asia)': 'russia',
+            'india': 'india', 'china': 'china',
+            'united states of america': 'united states', 'united states': 'united states',
+            'european union': 'european union', 'europe': 'europe',
+            'asia pacific': 'asia pacific', 'middle east': 'middle east',
+            'africa': 'africa', 'south america': 'central and south america',
+            'latin america and the caribbean': 'central and south america',
+            'northern america': 'north america', 'southern asia': 'asia pacific',
+            'asia without china': 'asia pacific', 'asia': 'asia pacific',
+            'eurasia': 'eurasia', 'south-eastern asia': 'southeast asia',
+        }
+        if eco_name in known_mappings:
+            return known_mappings[eco_name] in weo_name
+        if eco_name in weo_name or weo_name in eco_name:
+            if 'china' in weo_name and 'india' in eco_name:
+                return False
+            if 'india' in weo_name and 'china' in eco_name:
+                return False
+            return True
+        return False
+
+    def extract_regions_from_excel(self, subtract_filename="Impacts to subtract.xlsm"):
+        impacts_subtract_path = self.data_folder / subtract_filename
+        try:
+            paste_df = pd.read_excel(impacts_subtract_path, sheet_name="Paste results here", header=None)
+            regions_data = []
+            for idx, row in paste_df.iterrows():
+                if pd.isna(row[1]):
+                    continue
+                process = str(row[1])
+                if 'market for electricity' in process:
+                    voltage_match = re.search(r'electricity, (high|medium|low) voltage', process, re.IGNORECASE)
+                    if voltage_match:
+                        voltage = voltage_match.group(1).lower()
+                        region_match = re.search(r'\{(.*?)\}', process)
+                        if region_match:
+                            region      = region_match.group(1)
+                            base_region = region.split('-')[0].strip() if '-' in region else region
+                            amount = 0
+                            if len(row) > 4 and pd.notna(row[4]):
+                                try:
+                                    amount = float(row[4])
+                                except:
+                                    amount = 0
+                            regions_data.append({
+                                'region': region, 'base_region': base_region,
+                                'voltage': voltage, 'amount_mj': amount, 'process': process
+                            })
+            return regions_data
+        except Exception as e:
+            self._print(f"Error reading paste results: {e}")
+            return []
+
+    def read_subtract_totals(self, subtract_filename="Impacts to subtract.xlsm"):
+        impacts_subtract_path = self.data_folder / subtract_filename
+        try:
+            subtract_df     = pd.read_excel(impacts_subtract_path, sheet_name="Subtract sum")
+            subtract_totals = {}
+            for idx, row in subtract_df.iterrows():
+                impact_cat = None
+                if 'Impact categories' in subtract_df.columns:
+                    impact_cat = row['Impact categories']
+                elif 'Impact category' in subtract_df.columns:
+                    impact_cat = row['Impact category']
+                if pd.notna(impact_cat):
+                    value = None
+                    if 'TOTAL TO SUBTRACT' in subtract_df.columns:
+                        value = row['TOTAL TO SUBTRACT']
+                    elif any('subtract' in str(col).lower() for col in subtract_df.columns):
+                        for col in subtract_df.columns:
+                            if 'subtract' in str(col).lower():
+                                value = row[col]
+                                break
+                    if pd.notna(value):
+                        subtract_totals[str(impact_cat).strip()] = float(value)
+            return subtract_totals
+        except Exception as e:
+            self._print(f"Error reading subtract totals: {e}")
+            return {}
+
+    def read_simapro_impacts(self, simapro_filename="SimaPro impacts.xlsx"):
+        simapro_path = self.data_folder / simapro_filename
+        try:
+            simapro_df      = pd.read_excel(simapro_path, sheet_name="Sheet1")
+            simapro_impacts = {}
+            for idx, row in simapro_df.iterrows():
+                impact_cat = row['Impact category']
+                if pd.notna(impact_cat):
+                    value = None
+                    for col in simapro_df.columns:
+                        if col not in ('Impact category', 'Unit'):
+                            val = row[col]
+                            if pd.notna(val):
+                                value = float(val)
+                                break
+                    if value is not None:
+                        simapro_impacts[str(impact_cat).strip()] = value
+            return simapro_impacts
+        except Exception as e:
+            self._print(f"Error reading SimaPro impacts: {e}")
+            return {}
+
+    def get_nearest_year(self, target_year, available_years):
+        numeric_years = []
+        for year in available_years:
+            try:
+                if isinstance(year, str):
+                    if year.isdigit():
+                        numeric_years.append(int(year))
+                    elif '.' in year and year.replace('.', '', 1).isdigit():
+                        numeric_years.append(int(float(year)))
+                    elif any(char.isdigit() for char in year):
+                        match = re.search(r'(\d+)', year)
+                        if match:
+                            numeric_years.append(int(match.group(1)))
+                else:
+                    numeric_years.append(int(year))
+            except (ValueError, TypeError):
+                continue
+        if not numeric_years:
+            return None
+        return min(numeric_years, key=lambda x: abs(x - target_year))
+
+    def get_region_tech_impacts(self, region_code, tech_sheet):
+        if tech_sheet not in self.tech_impacts:
+            return None
+        df          = self.tech_impacts[tech_sheet]
+        region_code = str(region_code).strip()
+        hierarchies = [f'{{{region_code}}}']
+        if '-' in region_code:
+            base_country = region_code.split('-')[0].strip()
+            hierarchies.append(f'{{{base_country}}}')
+            hierarchies.append(f'{{{base_country}-')
+        if '-' not in region_code:
+            hierarchies.append(f'{{{region_code}-')
+        hierarchies += ['{RoW}', '{GLO}', '{World}']
+        for region_pattern in hierarchies:
+            region_cols = [col for col in df.columns
+                           if isinstance(col, str) and region_pattern in col]
+            if region_cols:
+                impacts = {}
+                for idx, row in df.iterrows():
+                    impact_category = row['Impact category']
+                    values = []
+                    for col in region_cols:
+                        val = row[col]
+                        if pd.notna(val):
+                            try:
+                                values.append(float(val))
+                            except (ValueError, TypeError):
+                                continue
+                    if values:
+                        impacts[impact_category] = np.mean(values)
+                if impacts:
+                    return impacts
+        return None
+
+    def get_iea_sheet_for_country(self, country_name, scenario):
+        country_name_upper = country_name.upper()
+        scenario_upper     = scenario.upper()
+        exact_name = f"{country_name_upper} ({scenario_upper})"
+        if exact_name in self.iea_shares:
+            return exact_name
+        clean_name = re.sub(r'\s*\([^)]*\)\s*', '', country_name_upper).strip()
+        if clean_name and clean_name != country_name_upper:
+            clean_sheet = f"{clean_name} ({scenario_upper})"
+            if clean_sheet in self.iea_shares:
+                return clean_sheet
+        return None
+
+    def get_weo_sheet_name(self, base_name, scenario):
+        full_name = f"{base_name} ({scenario})".lower()
+        for sheet in self.iea_weo_shares.keys():
+            if sheet.lower() == full_name:
+                return sheet
+        for sheet in self.iea_weo_shares.keys():
+            sl = sheet.lower()
+            if sl.startswith(base_name.lower() + " (") and f"({scenario.lower()}" in sl:
+                return sheet
+        for sheet in self.iea_weo_shares.keys():
+            sl = sheet.lower()
+            if base_name.lower() in sl and scenario.lower() in sl:
+                return sheet
+        return None
+
+    def find_weo_region_for_country(self, country_code, weo_scenario):
+        if country_code not in self.country_to_ecoinvent_regions:
+            return None
+        country_name = self.code_to_country_name.get(country_code, country_code)
+        for sheet_name in self.iea_weo_shares.keys():
+            if f"({weo_scenario})" in sheet_name or f"({weo_scenario}" in sheet_name:
+                sheet_region = sheet_name.split('(')[0].strip()
+                if country_name.lower() in sheet_region.lower() or sheet_region.lower() in country_name.lower():
+                    return sheet_name
+        ecoinvent_regions   = self.country_to_ecoinvent_regions[country_code]
+        weo_regional_sheets = [
+            'North America', 'Central and South America', 'Europe', 'European Union',
+            'Africa', 'Middle East', 'Eurasia', 'Asia Pacific', 'Southeast Asia', 'World'
+        ]
+        for sheet_name in self.iea_weo_shares.keys():
+            if f"({weo_scenario})" in sheet_name or f"({weo_scenario}" in sheet_name:
+                sheet_region = sheet_name.split('(')[0].strip()
+                is_regional  = any(r.lower() in sheet_region.lower() for r in weo_regional_sheets)
+                if is_regional:
+                    for eco_region in ecoinvent_regions:
+                        eco_clean   = self.clean_region_name(eco_region)
+                        sheet_clean = self.clean_region_name(sheet_region)
+                        if self.regions_match(eco_clean, sheet_clean):
+                            return sheet_name
+        return None
+
+    def get_iea_data_for_region(self, country_code, scenario, use_weo=True):
+        iea_scenario = self.scenario_mapping[scenario]['iea']
+        country_name = self.code_to_country_name.get(country_code)
+        if country_name:
+            isp_sheet = self.get_iea_sheet_for_country(country_name, iea_scenario)
+            if isp_sheet and isp_sheet in self.iea_shares:
+                return ("ISP", isp_sheet, iea_scenario)
+        if use_weo and scenario != 'LW':
+            weo_scenario = 'CPS' if scenario == 'FS' else 'STEPS'
+            if country_name:
+                country_sheet = self.get_weo_sheet_name(country_name, weo_scenario)
+                if country_sheet:
+                    return ("WEO_COUNTRY", country_sheet, weo_scenario)
+        return None
+
+    def _calculate_from_iea_shares(self, source_type, sheet_name, data_scenario, region, target_year, tech_region=None):
+        impact_region = tech_region if tech_region else region
+        if source_type == "ISP":
+            if sheet_name not in self.iea_shares:
+                return None
+            shares_df = self.iea_shares[sheet_name]
+        elif source_type in ("WEO_COUNTRY", "WEO_REGION"):
+            if sheet_name not in self.iea_weo_shares:
+                return None
+            shares_df = self.iea_weo_shares[sheet_name]
+        else:
+            return None
+        if source_type in ("WEO_COUNTRY", "WEO_REGION") and 'Technology_Formatted' in shares_df.columns:
+            shares_df = shares_df.set_index('Technology_Formatted')
+        year_columns = []
+        for col in shares_df.columns:
+            try:
+                year_columns.append((col, int(float(col))))
+            except (ValueError, TypeError):
+                continue
+        if not year_columns:
+            return None
+        int_years        = [y for _, y in year_columns]
+        nearest_year_int = self.get_nearest_year(target_year, int_years)
+        if not nearest_year_int:
+            return None
+        nearest_year_col = next((col for col, y in year_columns if y == nearest_year_int), None)
+        if not nearest_year_col:
+            return None
+        total         = {}
+        shares_series = shares_df[nearest_year_col]
+        for tech_name, share in shares_series.items():
+            if pd.notna(share) and share != 0:
+                tech_name_str = str(tech_name).strip()
+                tech_sheet    = self.tech_mapping.get(tech_name_str)
+                if not tech_sheet and tech_name_str in self.tech_mapping.values():
+                    tech_sheet = tech_name_str
+                if tech_sheet:
+                    tech_impacts = self.get_region_tech_impacts(impact_region, tech_sheet)
+                    if tech_impacts:
+                        for impact_cat, impact_mj in tech_impacts.items():
+                            total[impact_cat] = total.get(impact_cat, 0) + share * impact_mj
+        return total
+
+    def apply_voltage_adjustment(self, high_impacts, voltage):
+        if voltage == 'high':
+            return high_impacts
+        factor = 1.004526176 if voltage == 'medium' else 1.112
+        adjusted = {}
+        for impact_cat, impact in high_impacts.items():
+            adj_impact = impact * factor
+            if impact_cat in self.transmission_impacts:
+                adj_impact += self.transmission_impacts[impact_cat]
+            adjusted[impact_cat] = adj_impact
+        return adjusted
+
+    def _add_to_total(self, total_dict, impacts_dict, amount):
+        for impact_cat, impact_mj in impacts_dict.items():
+            total_dict[impact_cat] = total_dict.get(impact_cat, 0) + amount * impact_mj
+
+    def calculate_future_impacts_option1(self, regions_data, target_year, scenario, use_eu_for_eu=True):
+        scenario_data = self.scenario_mapping[scenario]
+        total_add     = {}
+        eu_countries  = ['EU', 'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI',
+                         'FR', 'GR', 'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL',
+                         'PL', 'PT', 'RO', 'SE', 'SI', 'SK']
+
+        for item in regions_data:
+            region      = item['region']
+            base_region = item['base_region']
+            voltage     = item['voltage']
+            amount_mj   = item['amount_mj']
+            source_used = None
+
+            if base_region == 'GB':
+                uk_sheet = scenario_data['uk']
+                if uk_sheet in self.ng_eso_data:
+                    uk_df    = self.ng_eso_data[uk_sheet]
+                    year_cols = [col for col in uk_df.columns if str(col).isdigit()]
+                    nearest_year = self.get_nearest_year(target_year, year_cols)
+                    if nearest_year:
+                        high_impacts = {}
+                        for _, uk_row in uk_df.iterrows():
+                            impact_cat = uk_row.iloc[0]
+                            if pd.notna(impact_cat) and nearest_year in uk_df.columns:
+                                val = uk_row[nearest_year]
+                                if pd.notna(val):
+                                    high_impacts[str(impact_cat)] = val / 3.6
+                        if high_impacts:
+                            self._add_to_total(total_add,
+                                               self.apply_voltage_adjustment(high_impacts, voltage),
+                                               amount_mj)
+                            source_used = "UK"
+                            continue
+
+            is_eu_country = base_region in eu_countries
+
+            if is_eu_country:
+                if use_eu_for_eu:
+                    eu_sheet = scenario_data['eu']
+                    if eu_sheet in self.eu_data:
+                        eu_df    = self.eu_data[eu_sheet]
+                        year_cols = [col for col in eu_df.columns if str(col).isdigit()]
+                        nearest_year = self.get_nearest_year(target_year, year_cols)
+                        if nearest_year:
+                            high_impacts = {}
+                            for _, eu_row in eu_df.iterrows():
+                                impact_cat = eu_row.iloc[0]
+                                if pd.notna(impact_cat) and nearest_year in eu_df.columns:
+                                    val = eu_row[nearest_year]
+                                    if pd.notna(val):
+                                        high_impacts[str(impact_cat)] = val / 3.6
+                            if high_impacts:
+                                self._add_to_total(total_add,
+                                                   self.apply_voltage_adjustment(high_impacts, voltage),
+                                                   amount_mj)
+                                source_used = "EU"
+                                continue
+                else:
+                    iea_result = self.get_iea_data_for_region(base_region, scenario, use_weo=True)
+                    if iea_result:
+                        source_type, sheet_name, data_scenario = iea_result
+                        high_impacts = self._calculate_from_iea_shares(
+                            source_type, sheet_name, data_scenario, base_region, target_year, base_region)
+                        if high_impacts:
+                            self._add_to_total(total_add,
+                                               self.apply_voltage_adjustment(high_impacts, voltage),
+                                               amount_mj)
+                            source_used = source_type
+                            continue
+                    eu_sheet = scenario_data['eu']
+                    if eu_sheet in self.eu_data:
+                        eu_df    = self.eu_data[eu_sheet]
+                        year_cols = [col for col in eu_df.columns if str(col).isdigit()]
+                        nearest_year = self.get_nearest_year(target_year, year_cols)
+                        if nearest_year:
+                            high_impacts = {}
+                            for _, eu_row in eu_df.iterrows():
+                                impact_cat = eu_row.iloc[0]
+                                if pd.notna(impact_cat) and nearest_year in eu_df.columns:
+                                    val = eu_row[nearest_year]
+                                    if pd.notna(val):
+                                        high_impacts[str(impact_cat)] = val / 3.6
+                            if high_impacts:
+                                self._add_to_total(total_add,
+                                                   self.apply_voltage_adjustment(high_impacts, voltage),
+                                                   amount_mj)
+                                source_used = "EU (IEA fallback)"
+                                continue
+
+            if not source_used and not is_eu_country:
+                iea_result = self.get_iea_data_for_region(base_region, scenario, use_weo=True)
+                if iea_result:
+                    source_type, sheet_name, data_scenario = iea_result
+                    high_impacts = self._calculate_from_iea_shares(
+                        source_type, sheet_name, data_scenario, base_region, target_year, base_region)
+                    if high_impacts:
+                        self._add_to_total(total_add,
+                                           self.apply_voltage_adjustment(high_impacts, voltage),
+                                           amount_mj)
+                        source_used = source_type
+                        continue
+                if scenario != 'LW':
+                    weo_scenario = 'CPS' if scenario == 'FS' else 'STEPS'
+                    country_name = self.code_to_country_name.get(base_region)
+                    if country_name:
+                        for sheet in self.iea_weo_shares.keys():
+                            if f"({weo_scenario})" in sheet or f"({weo_scenario}" in sheet:
+                                sheet_country = sheet.split('(')[0].strip()
+                                if (country_name.lower() == sheet_country.lower() or
+                                        country_name.lower() in sheet_country.lower() or
+                                        sheet_country.lower() in country_name.lower()):
+                                    high_impacts = self._calculate_from_iea_shares(
+                                        "WEO_COUNTRY", sheet, weo_scenario, base_region, target_year, base_region)
+                                    if high_impacts:
+                                        self._add_to_total(total_add,
+                                                           self.apply_voltage_adjustment(high_impacts, voltage),
+                                                           amount_mj)
+                                        source_used = "WEO_COUNTRY"
+                                        break
+                        if source_used:
+                            continue
+                    region_sheet = self.find_weo_region_for_country(base_region, weo_scenario)
+                    if region_sheet:
+                        if 'world' not in region_sheet.split('(')[0].strip().lower():
+                            high_impacts = self._calculate_from_iea_shares(
+                                "WEO_REGION", region_sheet, weo_scenario, base_region, target_year, base_region)
+                            if high_impacts:
+                                self._add_to_total(total_add,
+                                                   self.apply_voltage_adjustment(high_impacts, voltage),
+                                                   amount_mj)
+                                source_used = "WEO_REGION"
+                                continue
+
+            if not source_used:
+                global_sheet = scenario_data['global']
+                if global_sheet in self.iea_global:
+                    global_df = self.iea_global[global_sheet]
+                    year_cols = [col for col in global_df.columns if str(col).isdigit()]
+                    nearest_year = self.get_nearest_year(target_year, year_cols)
+                    if nearest_year:
+                        high_impacts = {}
+                        for _, global_row in global_df.iterrows():
+                            impact_cat = global_row.iloc[0]
+                            if pd.notna(impact_cat) and nearest_year in global_df.columns:
+                                val = global_row[nearest_year]
+                                if pd.notna(val):
+                                    high_impacts[str(impact_cat)] = val / 3.6
+                        if high_impacts:
+                            self._add_to_total(total_add,
+                                               self.apply_voltage_adjustment(high_impacts, voltage),
+                                               amount_mj)
+        return total_add
+
+    def run_calculation(self, option, target_year, scenario,
+                        ar6_model=None, ar6_scenario=None, use_eu_for_eu=True,
+                        simapro_filename="SimaPro impacts.xlsx",
+                        subtract_filename="Impacts to subtract.xlsm"):
+        if target_year < 2025:
+            raise ValueError("Year must be 2025 or later")
+
+        regions_data    = self.extract_regions_from_excel(subtract_filename)
+        subtract_totals = self.read_subtract_totals(subtract_filename)
+        simapro_impacts = self.read_simapro_impacts(simapro_filename)
+
+        if option == 1:
+            add_impacts = self.calculate_future_impacts_option1(
+                regions_data, target_year, scenario, use_eu_for_eu)
+        else:
+            raise ValueError("Only Option 1 is supported in this integrated version")
+
+        standard_categories = [
+            'Acidification', 'Climate change', 'Climate change - Biogenic',
+            'Climate change - Fossil', 'Climate change - Land use and LU change',
+            'Ecotoxicity, freshwater', 'Ecotoxicity, freshwater - inorganics',
+            'Ecotoxicity, freshwater - organics', 'Particulate matter',
+            'Eutrophication, marine', 'Eutrophication, freshwater',
+            'Eutrophication, terrestrial', 'Human toxicity, cancer',
+            'Human toxicity, cancer - inorganics', 'Human toxicity, cancer - organics',
+            'Human toxicity, non-cancer', 'Human toxicity, non-cancer - inorganics',
+            'Human toxicity, non-cancer - organics', 'Ionising radiation', 'Land use',
+            'Ozone depletion', 'Photochemical ozone formation', 'Resource use, fossils',
+            'Resource use, minerals and metals', 'Water use'
+        ]
+
+        unit_map = {
+            'Acidification': 'mol H+ eq', 'Climate change': 'kg CO2 eq',
+            'Climate change - Biogenic': 'kg CO2 eq', 'Climate change - Fossil': 'kg CO2 eq',
+            'Climate change - Land use and LU change': 'kg CO2 eq',
+            'Ecotoxicity, freshwater': 'CTUe', 'Ecotoxicity, freshwater - inorganics': 'CTUe',
+            'Ecotoxicity, freshwater - organics': 'CTUe', 'Particulate matter': 'disease inc.',
+            'Eutrophication, marine': 'kg N eq', 'Eutrophication, freshwater': 'kg P eq',
+            'Eutrophication, terrestrial': 'mol N eq', 'Human toxicity, cancer': 'CTUh',
+            'Human toxicity, cancer - inorganics': 'CTUh', 'Human toxicity, cancer - organics': 'CTUh',
+            'Human toxicity, non-cancer': 'CTUh', 'Human toxicity, non-cancer - inorganics': 'CTUh',
+            'Human toxicity, non-cancer - organics': 'CTUh', 'Ionising radiation': 'kBq U-235 eq',
+            'Land use': 'Pt', 'Ozone depletion': 'kg CFC11 eq',
+            'Photochemical ozone formation': 'kg NMVOC eq', 'Resource use, fossils': 'MJ',
+            'Resource use, minerals and metals': 'kg Sb eq', 'Water use': 'm3 depriv.'
+        }
+
+        results = []
+        for impact_cat in standard_categories:
+            simapro  = simapro_impacts.get(impact_cat, 0)
+            subtract = subtract_totals.get(impact_cat, 0)
+            add      = add_impacts.get(impact_cat, 0)
+            results.append({
+                'Impact category': impact_cat,
+                'Unit': unit_map.get(impact_cat, ''),
+                'SimaPro impact': simapro,
+                'Existing impacts to subtract': subtract,
+                'Future impacts to add': add,
+                'Final impact': simapro - subtract + add
+            })
+
+        return pd.DataFrame(results)
+
+
+BATTERY_CHEMISTRIES = {
+    "LFP": {
+        "kg_per_kwh": 8.3,
+        "efficiency": 0.92,
+        "dod": 0.9,
+        "a1a3": {
+            'Acidification': "add value",
+            'Climate change': "add value",
+            'Climate change - Biogenic': "add value",
+            'Climate change - Fossil': "add value",
+            'Climate change - Land use and LU change': "add value",
+            'Ecotoxicity, freshwater': "add value",
+            'Ecotoxicity, freshwater - inorganics': "add value",
+            'Ecotoxicity, freshwater - organics': "add value",
+            'Particulate matter': "add value",
+            'Eutrophication, marine': "add value",
+            'Eutrophication, freshwater': "add value",
+            'Eutrophication, terrestrial': "add value",
+            'Human toxicity, cancer': "add value",
+            'Human toxicity, cancer - inorganics': "add value",
+            'Human toxicity, cancer - organics': "add value",
+            'Human toxicity, non-cancer': "add value",
+            'Human toxicity, non-cancer - inorganics': "add value",
+            'Human toxicity, non-cancer - organics': "add value",
+            'Ionising radiation': "add value",
+            'Land use': "add value",
+            'Ozone depletion': "add value",
+            'Photochemical ozone formation': "add value",
+            'Resource use, fossils': "add value",
+            'Resource use, minerals and metals': "add value",
+            'Water use': "add value",
+        },
+        "b4_baseline": [
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value"
+        ],
+        "c_baseline": [
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value"
+        ],
+    },
+    "NMC811": {
+        "kg_per_kwh": 5.48,
+        "efficiency": 0.925,
+        "dod": 0.8,
+        "a1a3": {
+            'Acidification': "add value",
+            'Climate change': "add value",
+            'Climate change - Biogenic': "add value",
+            'Climate change - Fossil': "add value",
+            'Climate change - Land use and LU change': "add value",
+            'Ecotoxicity, freshwater': "add value",
+            'Ecotoxicity, freshwater - inorganics': "add value",
+            'Ecotoxicity, freshwater - organics': "add value",
+            'Particulate matter': "add value",
+            'Eutrophication, marine': "add value",
+            'Eutrophication, freshwater': "add value",
+            'Eutrophication, terrestrial': "add value",
+            'Human toxicity, cancer': "add value",
+            'Human toxicity, cancer - inorganics': "add value",
+            'Human toxicity, cancer - organics': "add value",
+            'Human toxicity, non-cancer': "add value",
+            'Human toxicity, non-cancer - inorganics': "add value",
+            'Human toxicity, non-cancer - organics': "add value",
+            'Ionising radiation': "add value",
+            'Land use': "add value",
+            'Ozone depletion': "add value",
+            'Photochemical ozone formation': "add value",
+            'Resource use, fossils': "add value",
+            'Resource use, minerals and metals': "add value",
+            'Water use': "add value",
+        },
+        "b4_baseline": [
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value"
+        ],
+        "c_baseline": [
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value"
+        ],
+    },
+    "NCA": {
+        "kg_per_kwh": 5.48,
+        "efficiency": 0.925,
+        "dod": 0.8,
+        "a1a3": {
+            'Acidification': "add value",
+            'Climate change': "add value",
+            'Climate change - Biogenic': "add value",
+            'Climate change - Fossil': "add value",
+            'Climate change - Land use and LU change': "add value",
+            'Ecotoxicity, freshwater': "add value",
+            'Ecotoxicity, freshwater - inorganics': "add value",
+            'Ecotoxicity, freshwater - organics': "add value",
+            'Particulate matter': "add value",
+            'Eutrophication, marine': "add value",
+            'Eutrophication, freshwater': "add value",
+            'Eutrophication, terrestrial': "add value",
+            'Human toxicity, cancer': "add value",
+            'Human toxicity, cancer - inorganics': "add value",
+            'Human toxicity, cancer - organics': "add value",
+            'Human toxicity, non-cancer': "add value",
+            'Human toxicity, non-cancer - inorganics': "add value",
+            'Human toxicity, non-cancer - organics': "add value",
+            'Ionising radiation': "add value",
+            'Land use': "add value",
+            'Ozone depletion': "add value",
+            'Photochemical ozone formation': "add value",
+            'Resource use, fossils': "add value",
+            'Resource use, minerals and metals': "add value",
+            'Water use': "add value",
+        },
+        "b4_baseline": [
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value"
+        ],
+        "c_baseline": [
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value",
+            "add value", "add value", "add value", "add value", "add value"
+        ],
+    },
+}
+
+
+def set_battery_chemistry(name: str):
+    global BATTERY_CHEMISTRY, BATTERY_KG_PER_KWH
+    global BATTERY_EFFICIENCY, BATTERY_DOD
+    global a1a3_factors, b4_factors_baseline, c_factors_baseline
+    c = BATTERY_CHEMISTRIES[name]
+    BATTERY_CHEMISTRY     = name
+    BATTERY_KG_PER_KWH    = c["kg_per_kwh"]
+    BATTERY_EFFICIENCY    = c["efficiency"]
+    BATTERY_DOD           = c["dod"]
+    a1a3_factors          = c["a1a3"]
+    b4_factors_baseline   = c["b4_baseline"]
+    c_factors_baseline    = c["c_baseline"]
+
+
+set_battery_chemistry("LFP")
+
+
+def check_inventory_data():
+    tables = {
+        "A1-A3 (battery)": list(a1a3_factors.values()),
+        "B4 BASELINE (battery)": b4_factors_baseline,
+        "C BASELINE (battery)": c_factors_baseline,
+        "A4 ship": a4_ship_baseline,
+        "A4 road BASELINE": a4_road_factors_baseline,
+        "A1-A3 (inverter)": inverter_a1a3_per_unit,
+        "C BASELINE (inverter)": inverter_c_baseline_per_unit,
+    }
+    missing = [k for k, v in tables.items() if any(x == "add value" for x in v)]
+    if missing:
+        raise SystemExit("Inventory values missing for: " + ", ".join(missing) +
+                         ". Replace each 'add value' with the inventory value as described in the README.")
+
+
+a4_ship_baseline = [
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value"
+]
+
+a4_road_factors_baseline = [
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value"
+]
+
+
+INVERTER_REF_KW       = 2.5
+INVERTER_REF_KG       = 18.5
+INVERTER_LIFETIME_YRS = 12
+BATTERY_DURATION_H    = 2
+
+inverter_a1a3_per_unit = [
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value"
+]
+inverter_b4_baseline_per_unit = inverter_a1a3_per_unit
+inverter_c_baseline_per_unit = [
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value",
+    "add value", "add value", "add value", "add value", "add value"
+]
+
+_battery_future_calculator: FutureImpactsCalculator = None
+_future_impacts_cache: dict = {}
+
+
+def initialize_future_calculator(batteries_folder: str):
+    global _battery_future_calculator
+    if _battery_future_calculator is None:
+        print(f"\nInitialising FutureImpactsCalculator for battery A4 road/B4/C...")
+        print(f"  Folder: {batteries_folder}")
+        _battery_future_calculator = FutureImpactsCalculator(batteries_folder, verbose=False)
+        print("  ✓ Calculator ready\n")
+
+
+def _get_future_module_per_kg(year: int, scenario: str, module: str) -> dict:
+    key = (year, scenario, module)
+    if key in _future_impacts_cache:
+        return _future_impacts_cache[key]
+    result_df = _battery_future_calculator.run_calculation(
+        option=1, target_year=year, scenario=scenario, use_eu_for_eu=False,
+        simapro_filename=f"SimaPro impacts_{module}.xlsx",
+        subtract_filename=f"Impacts to subtract_{module}.xlsm"
+    )
+    per_kg = dict(zip(result_df['Impact category'], result_df['Final impact']))
+    _future_impacts_cache[key] = per_kg
+    return per_kg
+
+
+def calculate_embodied_impacts(battery_mass: float, scenario: str,
+                                     battery_lifetime_years: float, install_times=None,
+                                      inverter_kw: float = 0.0) -> dict:
+    if install_times is None:
+        batteries_needed = math.ceil(round(60 / battery_lifetime_years, 9))
+        install_times = [k * battery_lifetime_years for k in range(batteries_needed)]
+    batteries_needed = len(install_times)
+
+    total    = {label: 0.0 for label in labels}
+    mod_a1a3 = {label: 0.0 for label in labels}
+    mod_a4   = {label: 0.0 for label in labels}
+    mod_b4   = {label: 0.0 for label in labels}
+    mod_c    = {label: 0.0 for label in labels}
+
+    for n in range(1, batteries_needed + 1):
+        installation_year = round(STUDY_START_YEAR + install_times[n - 1])
+        replacement_year  = round(STUDY_START_YEAR + (install_times[n] if n < batteries_needed else 60))
+        c_year = STUDY_END_YEAR if n == batteries_needed else replacement_year
+
+        if n == 1:
+            for label in labels:
+                a1a3_val = battery_mass * a1a3_factors[label]
+                mod_a1a3[label] += a1a3_val
+                total[label] += a1a3_val
+
+        for i, label in enumerate(labels):
+            ship = battery_mass * a4_ship_baseline[i] * (10000 / 1000)
+            if scenario.upper().strip() == "BASELINE":
+                road = battery_mass * a4_road_factors_baseline[i] * (500 / 1000)
+            else:
+                a4_road_per_kg = _get_future_module_per_kg(installation_year, scenario, "A4")
+                road = battery_mass * a4_road_per_kg.get(label, 0) * (500 / 1000)
+
+            mod_a4[label] += ship + road
+            total[label] += ship + road
+
+        if n < batteries_needed:
+            if scenario == "BASELINE":
+                for i, label in enumerate(labels):
+                    b4_val = battery_mass * b4_factors_baseline[i]
+                    mod_b4[label] += b4_val
+                    total[label]  += b4_val
+            else:
+                b4_per_kg = _get_future_module_per_kg(replacement_year, scenario, "B4")
+                for label in labels:
+                    b4_val = battery_mass * b4_per_kg.get(label, 0)
+                    mod_b4[label] += b4_val
+                    total[label]  += b4_val
+
+        if scenario == "BASELINE":
+            for i, label in enumerate(labels):
+                c_val = battery_mass * c_factors_baseline[i]
+                mod_c[label] += c_val
+                total[label] += c_val
+        else:
+            c_per_kg = _get_future_module_per_kg(c_year, scenario, "C")
+            for label in labels:
+                c_val = battery_mass * c_per_kg.get(label, 0)
+                mod_c[label] += c_val
+                total[label] += c_val
+
+    if inverter_kw and inverter_kw > 0:
+        units    = inverter_kw / INVERTER_REF_KW
+        inv_mass = units * INVERTER_REF_KG
+        inv_times = [k * INVERTER_LIFETIME_YRS
+                     for k in range(math.ceil(round(60 / INVERTER_LIFETIME_YRS, 9)))]
+        n_inv = len(inv_times)
+        for n in range(1, n_inv + 1):
+            installation_year = round(STUDY_START_YEAR + inv_times[n - 1])
+            replacement_year  = round(STUDY_START_YEAR + (inv_times[n] if n < n_inv else 60))
+            c_year = STUDY_END_YEAR if n == n_inv else replacement_year
+
+            if n == 1:
+                for i, label in enumerate(labels):
+                    v = units * inverter_a1a3_per_unit[i]
+                    mod_a1a3[label] += v
+                    total[label]    += v
+
+            for i, label in enumerate(labels):
+                ship = inv_mass * a4_ship_baseline[i] * (10000 / 1000)
+                if scenario.upper().strip() == "BASELINE":
+                    road = inv_mass * a4_road_factors_baseline[i] * (500 / 1000)
+                else:
+                    a4_road_per_kg = _get_future_module_per_kg(installation_year, scenario, "A4")
+                    road = inv_mass * a4_road_per_kg.get(label, 0) * (500 / 1000)
+                mod_a4[label] += ship + road
+                total[label]  += ship + road
+
+            if n < n_inv:
+                if scenario == "BASELINE":
+                    for i, label in enumerate(labels):
+                        v = units * inverter_b4_baseline_per_unit[i]
+                        mod_b4[label] += v
+                        total[label]  += v
+                else:
+                    b4_per_unit = _get_future_module_per_kg(replacement_year, scenario, "B4_inverter")
+                    for label in labels:
+                        v = units * b4_per_unit.get(label, 0)
+                        mod_b4[label] += v
+                        total[label]  += v
+
+            if scenario == "BASELINE":
+                for i, label in enumerate(labels):
+                    v = units * inverter_c_baseline_per_unit[i]
+                    mod_c[label] += v
+                    total[label] += v
+            else:
+                c_per_unit = _get_future_module_per_kg(c_year, scenario, "C_inverter")
+                for label in labels:
+                    v = units * c_per_unit.get(label, 0)
+                    mod_c[label] += v
+                    total[label] += v
+
+    return {
+        'total': total,
+        'A1A3':  mod_a1a3,
+        'A4':    mod_a4,
+        'B4':    mod_b4,
+        'C':     mod_c,
+    }
+
+
+FADE_TEMPERATURE_C  = 25.0
+FADE_EOL_DEFAULT    = 0.80
+FADE_SCALAR_STD     = 0.15
+FADE_S1_SIGMAS      = [-3, -2, -1, 1, 2, 3]
+FADE_S2_EOL_DEFAULT = 0.70
+HORIZON_YEARS       = 60
+FADE_SOC_DECIMALS   = 6
+FADE_S3_EFFICIENCY  = 0.815
+STANDBY_W           = 22.5
+STANDBY_IDLE_TOL_KWH = 1e-6
+
+BLAST_MODELS = {
+    "LFP":    [("Sony-Murata 3 Ah LFP-Gr",         "Lfp_Gr_SonyMurata3Ah_Battery"),
+               ("250 Ah prismatic LFP-Gr",         "Lfp_Gr_250AhPrismatic")],
+    "NMC811": [("LG M50 5 Ah NMC811-GrSi",         "Nmc811_GrSi_LGM50_5Ah_Battery"),
+               ("LG MJ1 4 Ah NMC811-GrSi",         "Nmc811_GrSi_LGMJ1_4Ah_Battery")],
+    "NCA":    [("Panasonic 3 Ah NCA-Gr",           "Nca_Gr_Panasonic3Ah_Battery"),
+               ("Sony-Murata 2.5 Ah NCA-GrSi",     "NCA_GrSi_SonyMurata2p5Ah_Battery")],
+}
+
+FADE_MODEL_NAME, FADE_MODEL_CLASS = BLAST_MODELS["LFP"][0]
+FADE_SCALAR = 1.0
+FADE_EOL    = FADE_EOL_DEFAULT
+
+import sys
+import types
+import warnings
+
+try:
+    import h5pyd
+except Exception:
+    sys.modules["h5pyd"] = types.ModuleType("h5pyd")
+if not hasattr(np, "trapz"):
+    np.trapz = np.trapezoid
+try:
+    from blast import models as blast_models
+    from blast.utils.rainflow import extract_cycles as blast_extract_cycles
+    BLAST_AVAILABLE = True
+except Exception as e:
+    print(f"BLAST-Lite import error: {e}")
+    BLAST_AVAILABLE = False
+
+
+def set_fade_model(chemistry: str, index: int = 0):
+    global FADE_MODEL_NAME, FADE_MODEL_CLASS
+    FADE_MODEL_NAME, FADE_MODEL_CLASS = BLAST_MODELS[chemistry][index]
+
+
+def set_fade_run(scalar: float, eol: float, efficiency=None):
+    global FADE_SCALAR, FADE_EOL, BATTERY_EFFICIENCY
+    FADE_SCALAR = scalar
+    FADE_EOL    = eol
+    BATTERY_EFFICIENCY = (BATTERY_CHEMISTRIES[BATTERY_CHEMISTRY]["efficiency"]
+                          if efficiency is None else efficiency)
+
+
+def apply_standby(grid_import, export, idle):
+    idle    = np.asarray(idle, dtype=bool)
+    standby = np.where(idle, STANDBY_W / 1000.0, 0.0)
+    exp     = np.asarray(export, dtype=float)
+    from_pv = np.minimum(standby, np.maximum(exp, 0.0))
+    from_grid = standby - from_pv
+    new_import = pd.Series(np.asarray(grid_import, dtype=float) + from_grid)
+    new_export = pd.Series(exp - from_pv)
+    return new_import, new_export, [int(idle.sum()), float(standby.sum()),
+                                    float(from_pv.sum()), float(from_grid.sum())]
+
+
+class BatteryFade:
+
+    def __init__(self):
+        self.installs = [0.0]
+        self.rows     = []
+        self._eol_time = None
+        self._new_cell()
+
+    def _new_cell(self):
+        self.cell = getattr(blast_models, FADE_MODEL_CLASS)(degradation_scalar=FADE_SCALAR)
+
+    def q(self):
+        return float(self.cell.outputs['q'][-1])
+
+    def begin_year(self, y):
+        t = self._replacement_time(float(y))
+        self.new_battery = (y == 0)
+        if y > 0 and t is not None:
+            self.installs.append(t)
+            self._eol_time = None
+            self._new_cell()
+            self.new_battery = True
+        self._q_start = self.q()
+        return self._q_start
+
+    def start_energy(self, capacity_y, carried_kwh):
+        if self.new_battery or carried_kwh is None:
+            return 0.5 * capacity_y
+        return min(max(carried_kwh, (1 - BATTERY_DOD) * capacity_y), capacity_y)
+
+    def _replacement_time(self, now):
+        return self._eol_time
+
+    def finish(self):
+        t = self._replacement_time(float(HORIZON_YEARS))
+        if t is not None and t < HORIZON_YEARS - 1e-6:
+            self.installs.append(t)
+            self._eol_time = None
+
+    def end_year(self, y, soc_fraction, annual_cycles, start_fraction=None):
+        soc = np.clip(np.asarray(soc_fraction, dtype=float), 0.0, 1.0)
+        soc = np.round(soc, FADE_SOC_DECIMALS)
+        if start_fraction is not None:
+            soc = np.append(start_fraction, soc)
+        else:
+            soc = np.append(soc, soc[-1])
+        t_secs = np.arange(len(soc)) * 3600.0
+        temp   = np.full(len(soc), FADE_TEMPERATURE_C)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with np.errstate(all="ignore"):
+                idx_turning_point = np.unique(np.array([cycle[-1] for cycle in blast_extract_cycles(soc)]))
+                efcs = np.cumsum(np.abs(np.ediff1d(soc, to_begin=0))) / 2
+                breakpoints = self.cell._find_breakpoints(
+                    t_secs, efcs, idx_turning_point, max_time_diff_s=86400, max_EFC_diff=1)
+                if breakpoints == [] or breakpoints[-1] != len(t_secs) - 1:
+                    breakpoints.append(len(t_secs) - 1)
+                prior = 0
+                for bp in breakpoints:
+                    if bp <= prior:
+                        continue
+                    self.cell.update_battery_state(t_secs[prior:bp + 1], soc[prior:bp + 1], temp[prior:bp + 1])
+                    prior = bp
+                    if self._eol_time is None and not (self.q() >= FADE_EOL):
+                        self._eol_time = float(y + t_secs[bp] / t_secs[-1])
+        if not np.isfinite(self.q()) or self.q() <= 0:
+            print(f"    WARNING: BLAST-Lite returned a relative capacity of {self.q():.4g} in "
+                  f"{STUDY_START_YEAR + y} (battery {len(self.installs)}); results for this case are not valid")
+        st = self.cell.states
+        loss_time  = sum(float(v[-1]) for k, v in st.items() if k.startswith('qLoss') and k.endswith('_t'))
+        loss_cycle = sum(float(v[-1]) for k, v in st.items() if k.startswith('qLoss') and not k.endswith('_t'))
+        self.rows.append([STUDY_START_YEAR + y, len(self.installs), self._q_start, self.q(),
+                          loss_time, loss_cycle, annual_cycles,
+                          float(soc[0]), float(soc[-1])])
+
+
+FADE_DETAIL_COLUMNS = ['Year', 'Battery number', 'Relative capacity at start of year',
+                       'Relative capacity at end of year', 'Capacity loss from time (battery in service)',
+                       'Capacity loss from cycling (battery in service)', 'Annual equivalent cycles',
+                       'State of charge at start of year (fraction of the year\'s capacity)',
+                       'State of charge at end of year (fraction of the year\'s capacity)',
+                       'Idle hours', 'Standby consumption (kWh)', 'Standby covered by PV (kWh)',
+                       'Standby covered by grid (kWh)']
+
+
+def get_fade_model_choice(chemistry):
+    options = BLAST_MODELS[chemistry]
+    while True:
+        print(f"\nSelect the capacity-fade model (BLAST-Lite) for {chemistry}:")
+        for i, (desc, _) in enumerate(options, 1):
+            print(f"{i}. {desc}")
+        choice = input(f"Enter choice (1-{len(options)}): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(options):
+            return int(choice) - 1
+        print(f"Please enter a number between 1 and {len(options)}")
+
+
+def get_fade_runs():
+    while True:
+        print("\nSelect run(s):")
+        print("1. S0 - capacity fade, central settings "
+              f"(degradation scalar 1, end of life {FADE_EOL_DEFAULT * 100:.0f}%)")
+        print("2. S1 - degradation scalar sensitivity "
+              f"({', '.join(f'{1 + s * FADE_SCALAR_STD:.2f}' for s in FADE_S1_SIGMAS)})")
+        print("3. S2 - end-of-life capacity sensitivity")
+        print(f"4. S3 - round-trip efficiency {FADE_S3_EFFICIENCY * 100:g}% (all chemistries)")
+        entry = input("Enter numbers separated by commas (Enter = all): ").strip()
+        picks = ["1", "2", "3", "4"] if entry == "" else [p.strip() for p in entry.split(",")]
+        if picks and all(p in ("1", "2", "3", "4") for p in picks):
+            break
+        print("Please enter numbers between 1 and 4")
+
+    runs = []
+    if "1" in picks:
+        runs.append({'tag': "S0", 'scalar': 1.0, 'eol': FADE_EOL_DEFAULT, 'sensitivity': False})
+    if "2" in picks:
+        for s in FADE_S1_SIGMAS:
+            scalar = round(1 + s * FADE_SCALAR_STD, 4)
+            runs.append({'tag': f"S1_x{scalar:.2f}", 'scalar': scalar, 'eol': FADE_EOL_DEFAULT,
+                         'sensitivity': True})
+    if "3" in picks:
+        while True:
+            entry = input(f"S2 end-of-life capacity in % (Enter = {FADE_S2_EOL_DEFAULT * 100:.0f}): ").strip()
+            if entry == "":
+                eol = FADE_S2_EOL_DEFAULT
+                break
+            try:
+                eol = float(entry) / 100
+                if 0 < eol < 1:
+                    break
+            except ValueError:
+                pass
+            print("Please enter a number between 0 and 100")
+        runs.append({'tag': f"S2_EOL{eol * 100:g}", 'scalar': 1.0, 'eol': eol, 'sensitivity': True})
+    if "4" in picks:
+        runs.append({'tag': f"S3_eff{FADE_S3_EFFICIENCY * 100:g}", 'scalar': 1.0, 'eol': FADE_EOL_DEFAULT,
+                     'sensitivity': True, 'efficiency': FADE_S3_EFFICIENCY})
+    return runs
+
+
+def _pick_from_list(title, items, show=str):
+    while True:
+        print(f"\n{title}")
+        for i, item in enumerate(items, 1):
+            print(f"{i}. {show(item)}")
+        entry = input("Enter numbers separated by commas (Enter = all): ").strip()
+        if entry == "":
+            return list(items)
+        picks = [p.strip() for p in entry.split(",")]
+        if all(p.isdigit() and 1 <= int(p) <= len(items) for p in picks):
+            chosen = []
+            for p in picks:
+                if items[int(p) - 1] not in chosen:
+                    chosen.append(items[int(p) - 1])
+            return chosen
+        print(f"Please enter numbers between 1 and {len(items)}")
+
+
+def get_sensitivity_scope(scenarios, weather_cases, impact_labels):
+    combos = [(s, w) for s in scenarios for w in weather_cases]
+    chosen_combos = _pick_from_list(
+        "S1/S2/S3: select the scenario / weather combinations", combos, lambda c: f"{c[0]} / {c[1]}")
+    chosen_labels = _pick_from_list(
+        "S1/S2/S3: select the impact categories", list(impact_labels))
+    return chosen_combos, chosen_labels
+
+
+def get_battery_capacity_for_optimization():
+    while True:
+        try:
+            capacity = float(input("Enter battery capacity in kWh (for operation optimization): ").strip())
+            if capacity > 0:
+                return capacity
+            else:
+                print("Please enter a positive number.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+
+def get_battery_choice():
+    while True:
+        print("\nSelect battery strategy:")
+        print("1. No battery")
+        print("2. Basic battery strategy (rule-based)")
+        choice = input("Enter choice (1 or 2): ").strip()
+        if choice in ['1', '2']:
+            return int(choice)
+        print("Please enter 1 or 2")
+
+
+def get_battery_chemistry_choice():
+    names = list(BATTERY_CHEMISTRIES.keys())
+    while True:
+        print("\nSelect battery chemistry:")
+        for i, n in enumerate(names, 1):
+            print(f"{i}. {n}")
+        choice = input(f"Enter choice (1-{len(names)}): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(names):
+            return names[int(choice) - 1]
+        print(f"Please enter a number between 1 and {len(names)}")
+
+
+def get_basic_strategy_capacity_choice():
+    print("\nFor basic battery strategy, select:")
+    print("1. Use fixed capacity")
+    print("2. Test several capacities (0 to 24 hours of average demand)")
+    while True:
+        try:
+            choice = int(input("Enter choice (1-2): "))
+            if choice in [1, 2]:
+                return choice
+            else:
+                print("Please enter 1 or 2")
+        except ValueError:
+            print("Please enter a valid number")
+
+
+_timestamp_cache = {}
+
+
+def _needs_timestamps():
+    if 'ts' not in _timestamp_cache:
+        original_df = pd.read_excel(needs_file_current, sheet_name="current", engine="openpyxl")
+        _timestamp_cache['ts'] = pd.to_datetime(original_df.iloc[:HOURS_PER_YEAR, 0])
+    return _timestamp_cache['ts']
+
+
+def simulate_battery_storage_full(needs_df, battery_capacity, return_soc=False, initial_soc_kwh=None):
+    if battery_capacity is None or battery_capacity == 0:
+        grid_import_no_battery = calculate_net_grid_import_without_battery(needs_df)
+        return (pd.Series(grid_import_no_battery), 0,
+                calculate_exports_without_battery(needs_df))
+
+    df = needs_df.copy()
+    df["timestamp"] = _needs_timestamps()
+    df["load_kWh"] = df.iloc[:, 0:5].sum(axis=1)
+    df["pv_kWh"]   = -df.iloc[:, 5]
+    generation     = df["pv_kWh"]
+
+    Hbat_dur    = 2
+    Rbat        = BATTERY_EFFICIENCY
+    DODbat      = BATTERY_DOD
+    single_eff  = (Rbat ** 0.5)
+    max_power   = battery_capacity / Hbat_dur
+    min_soc     = (1 - DODbat) * battery_capacity
+    initial_soc = 0.5 * battery_capacity
+    if initial_soc_kwh is not None:
+        initial_soc = initial_soc_kwh
+    usable_capacity = battery_capacity - min_soc
+
+    soc = initial_soc
+    soc_list, charge_list, discharge_list, grid_import_list = [], [], [], []
+    export_list = []
+    cumulative_throughput = 0
+
+    for load, gen in zip(df["load_kWh"], generation):
+        net_energy = gen - load
+        if net_energy > 0:
+            max_charge_possible = min(max_power, (battery_capacity - soc) / single_eff)
+            charge_energy = min(net_energy, max_charge_possible)
+            actual_charge = charge_energy * single_eff
+            soc += actual_charge
+            energy_used_for_charging = charge_energy
+            remaining_surplus = net_energy - energy_used_for_charging
+            export_kWh  = remaining_surplus
+            grid_import = 0
+            discharge   = 0.0
+            charge      = charge_energy
+            cumulative_throughput += charge_energy
+        else:
+            shortfall   = -net_energy
+            available_energy = max(0.0, soc - min_soc)
+            max_discharge_possible = min(max_power, available_energy * single_eff)
+            discharge_energy = min(shortfall, max_discharge_possible)
+            actual_discharge = discharge_energy / single_eff
+            soc -= actual_discharge
+            remaining_deficit = shortfall - discharge_energy
+            grid_import = remaining_deficit if remaining_deficit > 0 else 0
+            export_kWh  = 0.0
+            charge      = 0.0
+            discharge   = discharge_energy
+            cumulative_throughput += discharge_energy
+
+        soc = min(max(soc, min_soc), battery_capacity)
+        soc_list.append(soc)
+        charge_list.append(charge)
+        discharge_list.append(discharge)
+        grid_import_list.append(grid_import)
+        export_list.append(export_kWh)
+
+    annual_cycle_count = 0.5 * cumulative_throughput / usable_capacity if usable_capacity > 0 else 0
+    df["battery_charge_kWh"]    = charge_list
+    df["battery_discharge_kWh"] = discharge_list
+    df["storage_content_kWh"]   = soc_list
+    df["grid_import_kWh"]       = grid_import_list
+    if return_soc:
+        idle = [(ch <= STANDBY_IDLE_TOL_KWH and dis <= STANDBY_IDLE_TOL_KWH)
+                for ch, dis in zip(charge_list, discharge_list)]
+        return pd.Series(grid_import_list), annual_cycle_count, pd.Series(export_list), soc_list, idle
+    return pd.Series(grid_import_list), annual_cycle_count, pd.Series(export_list)
+
+
+def simulate_battery_storage(needs_df, battery_capacity):
+    grid_import, cycles, _ = simulate_battery_storage_full(needs_df, battery_capacity)
+    return grid_import, cycles
+
+
+_fade_cache = {}
+
+
+def simulate_60years_with_fade(needs_periods, capacity, weather_key):
+    key = (weather_key, round(float(capacity), 9), BATTERY_CHEMISTRY, FADE_MODEL_CLASS, FADE_SCALAR, FADE_EOL,
+           BATTERY_EFFICIENCY)
+    if key in _fade_cache:
+        return _fade_cache[key]
+    fade = BatteryFade()
+    imports, cycles, exports = [], [], []
+    carried = None
+    for y in range(HORIZON_YEARS):
+        q = fade.begin_year(y)
+        if len(needs_periods) == 1 or y < 26:
+            needs_y = needs_periods[0]
+        elif y < 56:
+            needs_y = needs_periods[1]
+        else:
+            needs_y = needs_periods[2]
+        start = fade.start_energy(capacity * q, carried)
+        grid_import, annual_cycles, export, soc, idle = simulate_battery_storage_full(
+            needs_y, capacity * q, return_soc=True, initial_soc_kwh=start)
+        fade.end_year(y, np.asarray(soc, dtype=float) / (capacity * q), annual_cycles,
+                      start_fraction=start / (capacity * q))
+        carried = float(soc[-1])
+        grid_import, export, standby = apply_standby(grid_import, export, idle)
+        fade.rows[-1].extend(standby)
+        imports.append(grid_import); cycles.append(annual_cycles); exports.append(export)
+    fade.finish()
+    result = {'imports': imports, 'cycles': cycles, 'exports': exports,
+              'installs': fade.installs, 'rows': fade.rows}
+    _fade_cache[key] = result
+    return result
+
+
+def basic_strategy_multiple_capacities(needs_data, avg_demand):
+    capacities_to_test = [i * avg_demand for i in range(0, 25)]
+    all_results = {}
+    print(f"Testing 25 capacities from 0 to {24*avg_demand:.1f} kWh...")
+    for i, test_capacity in enumerate(capacities_to_test):
+        hours = test_capacity / avg_demand
+        if test_capacity > 0:
+            fr = simulate_60years_with_fade((needs_data,), test_capacity, "current")
+            all_results[i] = {
+                'capacity_kWh':   test_capacity,
+                'hours':          hours,
+                'grid_imports':   fr['imports'],
+                'annual_cycles':  float(np.mean(fr['cycles'])),
+                'exports':        fr['exports'],
+                'cycles_by_year': fr['cycles'],
+                'installs':       fr['installs'],
+            }
+            if i % 5 == 0:
+                print(f"  Tested {i+1}/25 capacities...")
+            continue
+        grid_imports, annual_cycle_count, exports = simulate_battery_storage_full(needs_data, test_capacity)
+        all_results[i] = {
+            'capacity_kWh':  test_capacity,
+            'hours':         hours,
+            'grid_imports':  grid_imports,
+            'annual_cycles': annual_cycle_count,
+            'exports':       exports
+        }
+        if i % 5 == 0:
+            print(f"  Tested {i+1}/25 capacities...")
+    print("All capacity tests completed for basic strategy")
+    return all_results
+
+
+def basic_strategy_multiple_capacities_future(needs_periods, avg_demand, weather_key):
+    capacities_to_test = [i * avg_demand for i in range(0, 25)]
+    all_results = {}
+    print(f"Testing 25 capacities from 0 to {24*avg_demand:.1f} kWh ({weather_key} weather)...")
+    for i, test_capacity in enumerate(capacities_to_test):
+        hours = test_capacity / avg_demand
+        if test_capacity > 0:
+            fr = simulate_60years_with_fade(needs_periods, test_capacity, weather_key)
+            all_results[i] = {
+                'capacity_kWh':   test_capacity,
+                'hours':          hours,
+                'grid_imports':   fr['imports'],
+                'annual_cycles':  float(np.mean(fr['cycles'])),
+                'exports':        fr['exports'],
+                'cycles_by_year': fr['cycles'],
+                'installs':       fr['installs'],
+            }
+        else:
+            per_period = [simulate_battery_storage_full(n, 0) for n in needs_periods]
+            all_results[i] = {
+                'capacity_kWh':  test_capacity,
+                'hours':         hours,
+                'grid_imports':  [p[0] for p in per_period],
+                'annual_cycles': 0,
+                'exports':       [p[2] for p in per_period],
+            }
+        if i % 5 == 0:
+            print(f"  Tested {i+1}/25 capacities...")
+    print("All capacity tests completed for basic strategy")
+    return all_results
+
+
+def _write_future_sweep_sheet(writer, scenario, sheet_name, tests, output_labels):
+    impacts_df = load_impacts_for_scenario(scenario)
+    cycle_names = [f"Cycles {y}" for y in CYCLE_YEARS_FUT]
+    all_data = []
+    for test_num in range(25):
+        test_data = tests[test_num]
+        capacity  = test_data['capacity_kWh']
+        hours     = test_data['hours']
+        if 'installs' in test_data:
+            operational_impacts = calculate_impacts_by_year(test_data['grid_imports'], impacts_df, future=True)
+            module_d_values     = calculate_module_d_by_year(test_data['exports'], impacts_df, future=True)
+            installs, cycle_cols = _schedule_columns(test_data['cycles_by_year'], CYCLE_YEARS_FUT,
+                                                     test_data['installs'])
+            mods = calculate_embodied_impacts(
+                capacity * BATTERY_KG_PER_KWH, scenario, None, install_times=installs,
+                inverter_kw=capacity / BATTERY_DURATION_H)
+        else:
+            operational_impacts = calculate_future_impacts(*test_data['grid_imports'], impacts_df)
+            module_d_values     = calculate_module_d_future(*test_data['exports'], impacts_df)
+            cycle_cols = [0, ""] + [0] * len(CYCLE_YEARS_FUT)
+            mods = None
+
+        all_data.append([
+            f"{hours:.0f} hours ({capacity:.1f} kWh)", "Impact Category",
+            "Operational Impact (60 years)", "Embodied Impact (60 years)",
+            "A1-A3 (60 years)", "A4 (60 years)", "B4 (60 years)", "C (60 years)", "D (60 years)",
+            "Batteries needed", "Replacement years", *cycle_names,
+        ])
+        for label in output_labels:
+            if mods is not None:
+                emb = [mods['total'][label], mods['A1A3'][label], mods['A4'][label],
+                       mods['B4'][label], mods['C'][label]]
+            else:
+                emb = [0, 0, 0, 0, 0]
+            all_data.append(["", label, operational_impacts[label]] + emb
+                            + [module_d_values[label]] + cycle_cols)
+        all_data.append([""] * (11 + len(CYCLE_YEARS_FUT)))
+
+    pd.DataFrame(all_data, columns=[
+        'Capacity', 'Impact Category', 'Operational Impact (60 years)', 'Embodied Impact (60 years)',
+        'A1-A3 (60 years)', 'A4 (60 years)', 'B4 (60 years)', 'C (60 years)', 'D (60 years)',
+        "Batteries needed", "Replacement years", *cycle_names,
+    ]).to_excel(writer, sheet_name=sheet_name, index=False)
+
+
+def get_battery_adjusted_grid_import(needs_df, battery_choice=2, battery_capacity=None):
+    if battery_choice == 1:
+        grid_import = calculate_net_grid_import_without_battery(needs_df)
+        return grid_import, 0
+    return simulate_battery_storage(needs_df, battery_capacity)
+
+
+def safe_load_needs(needs_file, sheet_name):
+    tmp_df        = pd.read_excel(needs_file, sheet_name=sheet_name, engine="openpyxl")
+    expected_cols = ['B','C','D','E','F','H']
+    col_indices   = [column_index_from_string(c)-1 for c in expected_cols]
+    cols_data = []
+    for idx in col_indices:
+        if idx < len(tmp_df.columns):
+            col = tmp_df.iloc[:, idx].copy()
+        else:
+            col = pd.Series([0]*len(tmp_df))
+        cols_data.append(col)
+    return pd.concat(cols_data, axis=1).apply(pd.to_numeric, errors='coerce').fillna(0).iloc[:HOURS_PER_YEAR]
+
+
+def calculate_net_grid_import_without_battery(needs_df):
+    consumption_kWh = needs_df.iloc[:, 0:5].copy()
+    total_load      = consumption_kWh.sum(axis=1)
+    pv_generation   = -needs_df.iloc[:, 5]
+    net_grid_import = total_load - np.minimum(pv_generation, total_load)
+    return net_grid_import
+
+
+def calculate_avg_demand(needs_df):
+    df = needs_df.copy()
+    total_load = df.iloc[:, 0:5].sum(axis=1)
+    return total_load.mean()
+
+
+def calculate_current_impacts(grid_imports, impacts_df):
+    results = {}
+    years_variable = 26
+    years_repeated = 34
+
+    slice_variable_impacts = slice(0, HOURS_PER_YEAR * years_variable)
+    slice_repeated_impacts = slice(
+        HOURS_PER_YEAR * (years_variable - 1),
+        HOURS_PER_YEAR * years_variable
+    )
+
+    grid_import_repeated = pd.concat(
+        [grid_imports.reset_index(drop=True)] * years_variable,
+        ignore_index=True
+    )
+
+    for i, label in enumerate(labels):
+
+        impacts_variable = (
+            impacts_df.iloc[slice_variable_impacts, i]
+            .reset_index(drop=True)
+        )
+
+        min_length = min(
+            len(grid_import_repeated),
+            len(impacts_variable)
+        )
+
+        col_sum_variable = (
+            grid_import_repeated.iloc[:min_length].to_numpy()
+            * impacts_variable.iloc[:min_length].to_numpy()
+        ).sum()
+
+        col_sum_repeated = (
+            grid_imports.reset_index(drop=True).to_numpy()
+            * impacts_df.iloc[slice_repeated_impacts, i]
+              .reset_index(drop=True).to_numpy()
+        ).sum() * years_repeated
+
+        results[label] = col_sum_variable + col_sum_repeated
+
+    return results
+
+
+def calculate_future_impacts(grid_imports_2020s, grid_imports_2050s, grid_imports_2080s, impacts_df):
+    results     = {}
+    years_2020s = 26
+    years_2050s = 30
+    years_2080s = 4
+
+    slice_2020s  = slice(0, HOURS_PER_YEAR * years_2020s)
+    slice_future = slice(-HOURS_PER_YEAR, None)
+
+    grid_imports_2020s_repeated = pd.concat(
+        [grid_imports_2020s.reset_index(drop=True)] * years_2020s,
+        ignore_index=True
+    )
+
+    for i, label in enumerate(labels):
+        impacts_2020s = (
+            impacts_df.iloc[slice_2020s, i]
+            .reset_index(drop=True)
+        )
+
+        min_length = min(
+            len(grid_imports_2020s_repeated),
+            len(impacts_2020s)
+        )
+
+        sum_2020s = (
+            grid_imports_2020s_repeated.iloc[:min_length].to_numpy() *
+            impacts_2020s.iloc[:min_length].to_numpy()
+        ).sum()
+
+        sum_2050s = (
+            grid_imports_2050s.reset_index(drop=True).to_numpy() *
+            impacts_df.iloc[slice_future, i].reset_index(drop=True).to_numpy()
+        ).sum() * years_2050s
+
+        sum_2080s = (
+            grid_imports_2080s.reset_index(drop=True).to_numpy() *
+            impacts_df.iloc[slice_future, i].reset_index(drop=True).to_numpy()
+        ).sum() * years_2080s
+
+        results[label] = sum_2020s + sum_2050s + sum_2080s
+
+    return results
+
+
+def calculate_impacts_by_year(series_by_year, impacts_df, future=False):
+    results = {}
+    for i, label in enumerate(labels):
+        if future:
+            repeated = impacts_df.iloc[-HOURS_PER_YEAR:, i].reset_index(drop=True).to_numpy()
+        else:
+            repeated = impacts_df.iloc[HOURS_PER_YEAR * 25:HOURS_PER_YEAR * 26, i].reset_index(drop=True).to_numpy()
+        total = 0.0
+        for y in range(60):
+            if y < 26:
+                factors = impacts_df.iloc[HOURS_PER_YEAR * y:HOURS_PER_YEAR * (y + 1), i].reset_index(drop=True).to_numpy()
+            else:
+                factors = repeated
+            total += (series_by_year[y].reset_index(drop=True).to_numpy() * factors).sum()
+        results[label] = total
+    return results
+
+
+def calculate_module_d_by_year(exports_by_year, impacts_df, future=False):
+    d = calculate_impacts_by_year(exports_by_year, impacts_df, future)
+    return {label: -value for label, value in d.items()}
+
+
+def load_impacts_for_scenario(scenario):
+    impacts_file = os.path.join(base_path, scenario_files[scenario])
+    impact_cols  = list(string.ascii_uppercase[1:26])
+    impacts_df   = pd.read_excel(impacts_file, sheet_name="Sheet1", usecols=",".join(impact_cols), engine="openpyxl")
+    return impacts_df.apply(pd.to_numeric, errors='coerce')
+
+
+def calculate_exports_without_battery(needs_df):
+    df = needs_df.copy()
+    load_kWh   = df.iloc[:, 0:5].sum(axis=1)
+    generation = -df.iloc[:, 5]
+    return np.maximum(generation - load_kWh, 0).reset_index(drop=True)
+
+
+def calculate_module_d_current(exports, impacts_df):
+    d = calculate_current_impacts(exports, impacts_df)
+    return {label: -value for label, value in d.items()}
+
+
+def calculate_module_d_future(exports_2020s, exports_2050s, exports_2080s, impacts_df):
+    d = calculate_future_impacts(exports_2020s, exports_2050s, exports_2080s, impacts_df)
+    return {label: -value for label, value in d.items()}
+
+
+def _schedule_columns(cycles_by_year, cycle_years, installs):
+    repl = "; ".join(str(round(STUDY_START_YEAR + t)) for t in installs[1:]) or "none"
+    yearly = [cycles_by_year[min(y - STUDY_START_YEAR, len(cycles_by_year) - 1)] for y in cycle_years]
+    return installs, [len(installs), repl] + yearly
+
+
+def _build_single_result_df(operational_results, capacity_to_use, cycles_by_year, scenario,
+                             battery_choice, module_d_results=None, cycle_years=CYCLE_YEARS,
+                             installs=None):
+    df = pd.DataFrame({
+        'Operational Impact (60 years)': pd.Series(operational_results)
+    })
+
+    cycle_cols_names = [f"Cycles {y}" for y in cycle_years]
+
+    has_battery = (
+        battery_choice > 1 and
+        capacity_to_use is not None and
+        capacity_to_use > 0
+    )
+
+    if has_battery:
+        battery_mass = capacity_to_use * BATTERY_KG_PER_KWH
+        installs, sched_cols = _schedule_columns(cycles_by_year, cycle_years, installs)
+        embodied_modules = calculate_embodied_impacts(
+            battery_mass, scenario, None, install_times=installs,
+            inverter_kw=capacity_to_use / BATTERY_DURATION_H)
+
+        df['Embodied Impact (60 years)'] = pd.Series(embodied_modules['total'])
+        df['A1-A3 (60 years)']           = pd.Series(embodied_modules['A1A3'])
+        df['A4 (60 years)']              = pd.Series(embodied_modules['A4'])
+        df['B4 (60 years)']              = pd.Series(embodied_modules['B4'])
+        df['C (60 years)']               = pd.Series(embodied_modules['C'])
+    else:
+        df['Embodied Impact (60 years)']  = 0.0
+        df['A1-A3 (60 years)']            = 0.0
+        df['A4 (60 years)']               = 0.0
+        df['B4 (60 years)']               = 0.0
+        df['C (60 years)']                = 0.0
+        sched_cols = [0, ""] + [0] * len(cycle_years)
+
+    if module_d_results is not None:
+        df['D (60 years)'] = pd.Series(module_d_results)
+    df['Batteries needed']   = sched_cols[0]
+    df['Replacement years']  = sched_cols[1]
+    for name, val in zip(cycle_cols_names, sched_cols[2:]):
+        df[name] = val
+
+    return df
+
+
+def get_scenario_selection():
+    print("\nSelect electricity scenario(s):")
+    for idx, s in enumerate(["BASELINE", "FS", "ST", "CT", "LW", "ALL SCENARIOS"], 1):
+        print(f"{idx}. {s}")
+    print("\nYou can enter multiple numbers separated by commas (e.g., 1,3,5)")
+
+    all_scenarios = ["BASELINE", "FS", "ST", "CT", "LW"]
+
+    while True:
+        try:
+            user_input = input("Enter selection(s): ").strip()
+            if user_input == "6":
+                return "ALL", all_scenarios.copy()
+            selections = [s.strip() for s in user_input.split(",")]
+            chosen = []
+            valid  = True
+            for sel in selections:
+                if not sel.isdigit() or not (1 <= int(sel) <= 5):
+                    print(f"Invalid: '{sel}'.  Enter numbers 1-5.")
+                    valid = False
+                    break
+                name = all_scenarios[int(sel) - 1]
+                if name not in chosen:
+                    chosen.append(name)
+            if valid and chosen:
+                label = chosen[0] if len(chosen) == 1 else f"SELECTED_{len(chosen)}"
+                return label, chosen
+        except ValueError:
+            print("Please enter valid numbers.")
+
+
+def get_weather_choice():
+    while True:
+        print("\nSelect weather case(s):")
+        print("1. Current weather")
+        print("2. Future weather (MEDIUM and/or HIGH)")
+        print("3. Current and future weather")
+        choice = input("Enter choice (1-3): ").strip()
+        if choice in ("1", "2", "3"):
+            break
+        print("Please enter 1, 2 or 3")
+    if choice == "1":
+        return ["current"]
+    future = {"1": ["medium"], "2": ["high"], "3": ["medium", "high"]}
+    while True:
+        print("\nSelect future weather:")
+        print("1. MEDIUM")
+        print("2. HIGH")
+        print("3. MEDIUM and HIGH")
+        sub = input("Enter choice (1-3): ").strip()
+        if sub in future:
+            break
+        print("Please enter 1, 2 or 3")
+    return (["current"] if choice == "3" else []) + future[sub]
+
+
+print("Building's operational impacts calculation")
+
+battery_choice = get_battery_choice()
+
+battery_capacity_input         = None
+basic_strategy_test_capacities = False
+
+if battery_choice == 2:
+    set_battery_chemistry(get_battery_chemistry_choice())
+    check_inventory_data()
+    print(f"\n=== RUNNING WITH {BATTERY_CHEMISTRY} BATTERY ===")
+    print(f"Parameters: {BATTERY_KG_PER_KWH} kg/kWh, "
+          f"{BATTERY_EFFICIENCY*100:.1f}% efficiency, "
+          f"{BATTERY_DOD*100:.0f}% DOD")
+
+    capacity_choice = get_basic_strategy_capacity_choice()
+    if capacity_choice == 1:
+        battery_capacity_input         = get_battery_capacity_for_optimization()
+        basic_strategy_test_capacities = False
+        print(f"Using basic battery strategy with {battery_capacity_input} kWh")
+    else:
+        basic_strategy_test_capacities = True
+        print("Using basic battery strategy testing 25 capacities (0-24h of average demand)")
+else:
+    print("Battery disabled — no battery simulation will run.")
+
+use_battery = battery_choice > 1
+
+fade_on = use_battery
+if fade_on:
+    if not BLAST_AVAILABLE:
+        raise SystemExit("ERROR: BLAST-Lite is required (capacity fade).")
+    set_fade_model(BATTERY_CHEMISTRY, get_fade_model_choice(BATTERY_CHEMISTRY))
+_, SCENARIOS_TO_RUN = get_scenario_selection()
+ALL_WEATHER = get_weather_choice()
+ALL_COMBOS  = [(s, w) for s in SCENARIOS_TO_RUN for w in ALL_WEATHER]
+sens_combos, sens_labels = ALL_COMBOS, list(labels)
+print(f"Scenarios: {', '.join(SCENARIOS_TO_RUN)}  |  Weather: {', '.join(ALL_WEATHER)}")
+if fade_on:
+    runs = get_fade_runs()
+    if any(r['sensitivity'] for r in runs):
+        sens_combos, sens_labels = get_sensitivity_scope(SCENARIOS_TO_RUN, ALL_WEATHER, labels)
+    print(f"Capacity fade: {FADE_MODEL_NAME}, {FADE_TEMPERATURE_C:g} C")
+    print(f"Runs: {', '.join(r['tag'] for r in runs)}")
+else:
+    runs = [{'tag': "", 'scalar': 1.0, 'eol': FADE_EOL_DEFAULT, 'sensitivity': False}]
+
+chem_suffix = f"_{BATTERY_CHEMISTRY}" if (use_battery and BATTERY_CHEMISTRY != "LFP") else ""
+
+if use_battery:
+    initialize_future_calculator(BATTERIES_FOLDER)
+
+print(f"Running simulation with battery choice: {battery_choice}")
+
+
+def run_current_weather(run_suffix, combos, output_labels):
+    cycle_counts_current     = {}
+    all_test_results_current = {}
+    fade_current             = {}
+    needs_current      = safe_load_needs(needs_file_current, "current")
+    avg_demand_current = calculate_avg_demand(needs_current)
+
+    current_results          = {}
+    module_d_results_current = {}
+
+    scenarios_to_process = [s for s in scenario_files.keys() if (s, "current") in combos]
+
+    for scenario in scenarios_to_process:
+        print(f"Processing {scenario} scenario...")
+        impacts_df = load_impacts_for_scenario(scenario)
+
+        if fade_on and not basic_strategy_test_capacities:
+            fr = simulate_60years_with_fade((needs_current,), battery_capacity_input, "current")
+            fade_current[scenario] = fr
+            cycle_counts_current[scenario] = float(np.mean(fr['cycles']))
+            current_results[scenario] = calculate_impacts_by_year(fr['imports'], impacts_df)
+            module_d_results_current[scenario] = calculate_module_d_by_year(fr['exports'], impacts_df)
+            continue
+
+        if use_battery and basic_strategy_test_capacities:
+            all_test_results = basic_strategy_multiple_capacities(needs_current, avg_demand_current)
+            all_test_results_current[scenario] = all_test_results
+            grid_import_current, total_cycle_count = get_battery_adjusted_grid_import(
+                needs_current, battery_choice=battery_choice, battery_capacity=0)
+        else:
+            grid_import_current, total_cycle_count = get_battery_adjusted_grid_import(
+                needs_current, battery_choice=battery_choice, battery_capacity=battery_capacity_input)
+
+        cycle_counts_current[scenario] = total_cycle_count
+
+        if len(grid_import_current) != HOURS_PER_YEAR:
+            if len(grid_import_current) > HOURS_PER_YEAR:
+                grid_import_current = grid_import_current.iloc[:HOURS_PER_YEAR]
+            else:
+                grid_import_current = grid_import_current.reindex(range(HOURS_PER_YEAR), fill_value=0)
+
+        operational_results = calculate_current_impacts(grid_import_current, impacts_df)
+        current_results[scenario] = operational_results
+
+        if not (use_battery and basic_strategy_test_capacities):
+            exports_current = calculate_exports_without_battery(needs_current)
+            module_d_results_current[scenario] = calculate_module_d_current(exports_current, impacts_df)
+
+    output_current = os.path.join(OUTPUT_FOLDER, f"impact_results_current_weather{chem_suffix}{run_suffix}.xlsx")
+    with pd.ExcelWriter(output_current, engine="openpyxl") as writer:
+
+        if use_battery and basic_strategy_test_capacities and all_test_results_current:
+            for scenario in scenarios_to_process:
+                if scenario not in all_test_results_current:
+                    continue
+                impacts_df = load_impacts_for_scenario(scenario)
+                all_data   = []
+
+                for test_num in range(25):
+                    test_data    = all_test_results_current[scenario][test_num]
+                    capacity     = test_data['capacity_kWh']
+                    hours        = test_data['hours']
+                    grid_imports = test_data['grid_imports']
+
+                    if 'installs' in test_data:
+                        operational_impacts = calculate_impacts_by_year(grid_imports, impacts_df)
+                        module_d_values     = calculate_module_d_by_year(test_data['exports'], impacts_df)
+                    else:
+                        operational_impacts = calculate_current_impacts(grid_imports, impacts_df)
+                        module_d_values     = calculate_module_d_current(test_data['exports'], impacts_df)
+
+                    annual_cycles  = test_data['annual_cycles']
+                    cycles_by_year = test_data.get('cycles_by_year', [annual_cycles] * 60)
+                    if capacity > 0:
+                        installs, cycle_cols = _schedule_columns(cycles_by_year, CYCLE_YEARS,
+                                                                 test_data.get('installs'))
+                    else:
+                        installs, cycle_cols = None, [0, ""] + [0] * len(CYCLE_YEARS)
+
+                    all_data.append([
+                        f"{hours:.0f} hours ({capacity:.1f} kWh)",
+                        "Impact Category",
+                        "Operational Impact (60 years)",
+                        "Embodied Impact (60 years)",
+                        "A1-A3 (60 years)",
+                        "A4 (60 years)",
+                        "B4 (60 years)",
+                        "C (60 years)",
+                        "D (60 years)",
+                        "Batteries needed", "Replacement years", *[f"Cycles {y}" for y in CYCLE_YEARS],
+                    ])
+
+                    for label in output_labels:
+                        operational_value = operational_impacts[label]
+
+                        if capacity > 0:
+                            battery_mass = capacity * BATTERY_KG_PER_KWH
+                            mods = calculate_embodied_impacts(
+                                battery_mass, scenario, None, install_times=installs,
+                                inverter_kw=capacity / BATTERY_DURATION_H)
+
+                            embodied_value = mods['total'][label]
+                            a1a3_value     = mods['A1A3'][label]
+                            a4_value       = mods['A4'][label]
+                            b4_value       = mods['B4'][label]
+                            c_value        = mods['C'][label]
+                        else:
+                            embodied_value = 0
+                            a1a3_value     = 0
+                            a4_value       = 0
+                            b4_value       = 0
+                            c_value        = 0
+
+                        all_data.append([
+                            "", label,
+                            operational_value,
+                            embodied_value,
+                            a1a3_value,
+                            a4_value,
+                            b4_value,
+                            c_value,
+                            module_d_values[label],
+                        ] + cycle_cols)
+
+                    all_data.append([""] * (11 + len(CYCLE_YEARS)))
+
+                df_all_tests = pd.DataFrame(all_data, columns=[
+                    'Capacity',
+                    'Impact Category',
+                    'Operational Impact (60 years)',
+                    'Embodied Impact (60 years)',
+                    'A1-A3 (60 years)',
+                    'A4 (60 years)',
+                    'B4 (60 years)',
+                    'C (60 years)',
+                    'D (60 years)',
+                    "Batteries needed",
+                    "Replacement years",
+                    *[f"Cycles {y}" for y in CYCLE_YEARS],
+                ])
+                df_all_tests.to_excel(writer, sheet_name=scenario, index=False)
+
+        else:
+            for scenario in current_results.keys():
+                capacity_to_use = battery_capacity_input if use_battery else None
+                fr = fade_current.get(scenario)
+                df_operational = _build_single_result_df(
+                    current_results[scenario],
+                    capacity_to_use,
+                    fr['cycles'] if fr else [cycle_counts_current[scenario]] * 60,
+                    scenario,
+                    battery_choice,
+                    module_d_results_current.get(scenario),
+                    installs=fr['installs'] if fr else None,
+                )
+                if len(output_labels) != len(labels):
+                    df_operational = df_operational.loc[output_labels]
+                df_operational.to_excel(writer, sheet_name=scenario)
+
+    print("Current scenario calculations complete.")
+    return output_current
+
+
+def run_future_weather(run_suffix, combos, output_labels):
+    cycles_by_year_med  = {}
+    cycles_by_year_high = {}
+    installs_med        = {}
+    installs_high       = {}
+    sweep_med           = {}
+    sweep_high          = {}
+    print("\nLoading future scenario data...")
+    needs_2020s_med,  needs_2050s_med,  needs_2080s_med  = (
+        safe_load_needs(needs_file_future, "2020s medium"),
+        safe_load_needs(needs_file_future, "2050s medium"),
+        safe_load_needs(needs_file_future, "2080s medium")
+    )
+    needs_2020s_high, needs_2050s_high, needs_2080s_high = (
+        safe_load_needs(needs_file_future, "2020s high"),
+        safe_load_needs(needs_file_future, "2050s high"),
+        safe_load_needs(needs_file_future, "2080s high")
+    )
+
+    future_results_med    = {}
+    future_results_high   = {}
+    module_d_results_med  = {}
+    module_d_results_high = {}
+
+    for scenario in scenario_files.keys():
+        if (scenario, "medium") not in combos and (scenario, "high") not in combos:
+            continue
+        print(f"Processing {scenario} future scenarios...")
+        impacts_df = load_impacts_for_scenario(scenario)
+        cycles_by_year_med[scenario]  = [0] * 60
+        cycles_by_year_high[scenario] = [0] * 60
+
+        if fade_on and not basic_strategy_test_capacities:
+            for weather_key, needs_periods, results, module_d, cycles, installs in (
+                    ("medium", (needs_2020s_med, needs_2050s_med, needs_2080s_med),
+                     future_results_med, module_d_results_med, cycles_by_year_med, installs_med),
+                    ("high", (needs_2020s_high, needs_2050s_high, needs_2080s_high),
+                     future_results_high, module_d_results_high, cycles_by_year_high, installs_high)):
+                if (scenario, weather_key) not in combos:
+                    continue
+                fr = simulate_60years_with_fade(needs_periods, battery_capacity_input, weather_key)
+                results[scenario]  = calculate_impacts_by_year(fr['imports'], impacts_df, future=True)
+                module_d[scenario] = calculate_module_d_by_year(fr['exports'], impacts_df, future=True)
+                cycles[scenario]   = fr['cycles']
+                installs[scenario] = fr['installs']
+            continue
+
+        if use_battery:
+            for weather_key, needs_periods, sweeps in (
+                    ("medium", (needs_2020s_med, needs_2050s_med, needs_2080s_med), sweep_med),
+                    ("high", (needs_2020s_high, needs_2050s_high, needs_2080s_high), sweep_high)):
+                if (scenario, weather_key) not in combos:
+                    continue
+                sweeps[scenario] = basic_strategy_multiple_capacities_future(
+                    needs_periods, calculate_avg_demand(needs_periods[0]), weather_key)
+
+        else:
+            grid_import_2020s_med  = calculate_net_grid_import_without_battery(needs_2020s_med)
+            grid_import_2050s_med  = calculate_net_grid_import_without_battery(needs_2050s_med)
+            grid_import_2080s_med  = calculate_net_grid_import_without_battery(needs_2080s_med)
+            future_results_med[scenario] = calculate_future_impacts(
+                grid_import_2020s_med, grid_import_2050s_med, grid_import_2080s_med, impacts_df)
+            module_d_results_med[scenario] = calculate_module_d_future(
+                calculate_exports_without_battery(needs_2020s_med),
+                calculate_exports_without_battery(needs_2050s_med),
+                calculate_exports_without_battery(needs_2080s_med), impacts_df)
+
+            grid_import_2020s_high = calculate_net_grid_import_without_battery(needs_2020s_high)
+            grid_import_2050s_high = calculate_net_grid_import_without_battery(needs_2050s_high)
+            grid_import_2080s_high = calculate_net_grid_import_without_battery(needs_2080s_high)
+            future_results_high[scenario] = calculate_future_impacts(
+                grid_import_2020s_high, grid_import_2050s_high, grid_import_2080s_high, impacts_df)
+            module_d_results_high[scenario] = calculate_module_d_future(
+                calculate_exports_without_battery(needs_2020s_high),
+                calculate_exports_without_battery(needs_2050s_high),
+                calculate_exports_without_battery(needs_2080s_high), impacts_df)
+
+    output_future = os.path.join(OUTPUT_FOLDER, f"impact_results_future{chem_suffix}{run_suffix}.xlsx")
+    with pd.ExcelWriter(output_future, engine="openpyxl") as writer:
+
+        for sheet_suffix, sweeps in (("_MEDIUM", sweep_med), ("_HIGH", sweep_high)):
+            for scenario, tests in sweeps.items():
+                _write_future_sweep_sheet(writer, scenario, scenario + sheet_suffix, tests, output_labels)
+
+        for scenario in future_results_med.keys():
+            if (scenario, "medium") not in combos:
+                continue
+            capacity_to_use = battery_capacity_input if use_battery else None
+            df_operational = _build_single_result_df(
+                future_results_med[scenario],
+                capacity_to_use,
+                cycles_by_year_med[scenario],
+                scenario,
+                battery_choice,
+                module_d_results_med.get(scenario),
+                CYCLE_YEARS_FUT,
+                installs=installs_med.get(scenario),
+            )
+            if len(output_labels) != len(labels):
+                df_operational = df_operational.loc[output_labels]
+            df_operational.to_excel(writer, sheet_name=scenario + "_MEDIUM")
+
+        for scenario in future_results_high.keys():
+            if (scenario, "high") not in combos:
+                continue
+            capacity_to_use = battery_capacity_input if use_battery else None
+            df_operational = _build_single_result_df(
+                future_results_high[scenario],
+                capacity_to_use,
+                cycles_by_year_high[scenario],
+                scenario,
+                battery_choice,
+                module_d_results_high.get(scenario),
+                CYCLE_YEARS_FUT,
+                installs=installs_high.get(scenario),
+            )
+            if len(output_labels) != len(labels):
+                df_operational = df_operational.loc[output_labels]
+            df_operational.to_excel(writer, sheet_name=scenario + "_HIGH")
+    return output_future
+
+
+for run in runs:
+    set_fade_run(run['scalar'], run['eol'], run.get('efficiency'))
+    _fade_cache.clear()
+    run_suffix = f"_{run['tag']}" if run['tag'] else ""
+    combos        = sens_combos if run['sensitivity'] else ALL_COMBOS
+    output_labels = sens_labels if run['sensitivity'] else list(labels)
+    if fade_on:
+        print(f"\n{'#' * 60}\nRUN {run['tag']}: degradation scalar {run['scalar']:.2f}, "
+              f"end of life {run['eol'] * 100:g}%, round-trip efficiency {BATTERY_EFFICIENCY * 100:g}%\n{'#' * 60}")
+
+    output_current = output_future = None
+    if any(w == "current" for _, w in combos):
+        output_current = run_current_weather(run_suffix, combos, output_labels)
+    if any(w in ("medium", "high") for _, w in combos):
+        output_future = run_future_weather(run_suffix, combos, output_labels)
+
+    output_fade = None
+    if fade_on and _fade_cache:
+        fade_rows = []
+        for (weather_key, capacity, *_), fr in _fade_cache.items():
+            for row in fr['rows']:
+                fade_rows.append([weather_key, capacity] + row)
+        output_fade = os.path.join(OUTPUT_FOLDER, f"impact_results_fade_details{chem_suffix}{run_suffix}.xlsx")
+        pd.DataFrame(fade_rows, columns=['Weather', 'Capacity (kWh)'] + FADE_DETAIL_COLUMNS
+                     ).to_excel(output_fade, sheet_name="Capacity fade", index=False)
+
+    print("\nALL CALCULATIONS COMPLETE!")
+    print("Results saved to:")
+    if output_current:
+        print(f"  - Current weather: {output_current}")
+    if output_future:
+        print(f"  - Future scenarios: {output_future}")
+    if output_fade:
+        print(f"  - Capacity fade details: {output_fade}")
