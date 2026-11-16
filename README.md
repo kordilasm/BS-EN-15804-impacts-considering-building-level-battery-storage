@@ -56,14 +56,10 @@ Workflow:
 - the sensitivity runs: S0 (default settings), S1 (BLAST degradation scalar), S2 (end-of-life capacity) and S3 (round-trip efficiency)
 Results are written to OUTPUT_FOLDER (MSC script: impact_results_current_weather*.xlsx, impact_results_future*.xlsx and impact_results_fade_details*.xlsx; MILP script: batch_optimisation_*.xlsx).
 
-BLAST-Lite capacity fade models
-Chemistry	Models
-LFP	1. Sony-Murata 3 Ah LFP-Gr
-2. 250 Ah prismatic LFP-Gr
-NMC811	1. LG M50 5 Ah NMC811-GrSi
-2. LG MJ1 4 Ah NMC811-GrSi
-NCA	1. Panasonic 3 Ah NCA-Gr
-2. Sony-Murata 2.5 Ah NCA-GrSi
+BLAST-Lite capacity fade models:
+1. For LFP: Sony-Murata 3 Ah LFP-Gr & 250 Ah prismatic LFP-Gr
+2. For NMC811: LG M50 5 Ah NMC811-GrSi & LG MJ1 4 Ah NMC811-GrSi
+3. For NCA: Panasonic 3 Ah NCA-Gr & Sony-Murata 2.5 Ah NCA-GrSi
 
 The battery is replaced when its relative capacity falls below the end-of-life capacity (80% for S0 and S1, 70% for S2).
 
