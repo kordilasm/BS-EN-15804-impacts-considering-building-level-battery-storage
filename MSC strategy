@@ -9,7 +9,7 @@ import re
 
 base_path = "/Users/yourname/Downloads/hourly files/"
 OUTPUT_FOLDER = "/Users/yourname/Downloads/"
-NEEDS_FILE_NAME = "QPR hourly needs.xlsx"
+NEEDS_FILE_NAME = "your building's hourly hourly needs.xlsx"
 needs_file_current = os.path.join(base_path, NEEDS_FILE_NAME)
 needs_file_future  = os.path.join(base_path, NEEDS_FILE_NAME)
 
