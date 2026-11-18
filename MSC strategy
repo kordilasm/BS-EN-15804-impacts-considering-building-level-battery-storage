@@ -1,6 +1,9 @@
 import pandas as pd
 import string
 import os
+import sys
+import types
+import warnings
 import numpy as np
 from openpyxl.utils import column_index_from_string
 import math
@@ -9,7 +12,7 @@ import re
 
 base_path = "/Users/yourname/Downloads/hourly files/"
 OUTPUT_FOLDER = "/Users/yourname/Downloads/"
-NEEDS_FILE_NAME = "your building's hourly hourly needs.xlsx"
+NEEDS_FILE_NAME = "your building's hourly needs.xlsx"
 needs_file_current = os.path.join(base_path, NEEDS_FILE_NAME)
 needs_file_future  = os.path.join(base_path, NEEDS_FILE_NAME)
 
@@ -499,7 +502,6 @@ class FutureImpactsCalculator:
                          'PL', 'PT', 'RO', 'SE', 'SI', 'SK']
 
         for item in regions_data:
-            region      = item['region']
             base_region = item['base_region']
             voltage     = item['voltage']
             amount_mj   = item['amount_mj']
@@ -910,7 +912,7 @@ _battery_future_calculator: FutureImpactsCalculator = None
 _future_impacts_cache: dict = {}
 
 
-def initialize_future_calculator(batteries_folder: str):
+def initialise_future_calculator(batteries_folder: str):
     global _battery_future_calculator
     if _battery_future_calculator is None:
         _battery_future_calculator = FutureImpactsCalculator(batteries_folder)
@@ -930,12 +932,8 @@ def _get_future_module_per_kg(year: int, scenario: str, module: str) -> dict:
     return per_kg
 
 
-def calculate_embodied_impacts(battery_mass: float, scenario: str,
-                                     battery_lifetime_years: float, install_times=None,
-                                      inverter_kw: float = 0.0) -> dict:
-    if install_times is None:
-        batteries_needed = math.ceil(round(60 / battery_lifetime_years, 9))
-        install_times = [k * battery_lifetime_years for k in range(batteries_needed)]
+def calculate_embodied_impacts(battery_mass: float, scenario: str, install_times,
+                               inverter_kw: float = 0.0) -> dict:
     batteries_needed = len(install_times)
 
     total    = {label: 0.0 for label in labels}
@@ -957,7 +955,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str,
 
         for i, label in enumerate(labels):
             ship = battery_mass * a4_ship_baseline[i] * (10000 / 1000)
-            if scenario.upper().strip() == "BASELINE":
+            if scenario == "BASELINE":
                 road = battery_mass * a4_road_factors_baseline[i] * (500 / 1000)
             else:
                 a4_road_per_kg = _get_future_module_per_kg(installation_year, scenario, "A4")
@@ -1010,7 +1008,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str,
 
             for i, label in enumerate(labels):
                 ship = inv_mass * a4_ship_baseline[i] * (10000 / 1000)
-                if scenario.upper().strip() == "BASELINE":
+                if scenario == "BASELINE":
                     road = inv_mass * a4_road_factors_baseline[i] * (500 / 1000)
                 else:
                     a4_road_per_kg = _get_future_module_per_kg(installation_year, scenario, "A4")
@@ -1072,13 +1070,9 @@ BLAST_MODELS = {
                ("Sony-Murata 2.5 Ah NCA-GrSi",     "NCA_GrSi_SonyMurata2p5Ah_Battery")],
 }
 
-FADE_MODEL_NAME, FADE_MODEL_CLASS = BLAST_MODELS["LFP"][0]
+FADE_MODEL_CLASS = BLAST_MODELS["LFP"][0][1]
 FADE_SCALAR = 1.0
 FADE_EOL    = FADE_EOL_DEFAULT
-
-import sys
-import types
-import warnings
 
 try:
     import h5pyd
@@ -1091,8 +1085,8 @@ from blast.utils.rainflow import extract_cycles as blast_extract_cycles
 
 
 def set_fade_model(chemistry: str, index: int = 0):
-    global FADE_MODEL_NAME, FADE_MODEL_CLASS
-    FADE_MODEL_NAME, FADE_MODEL_CLASS = BLAST_MODELS[chemistry][index]
+    global FADE_MODEL_CLASS
+    FADE_MODEL_CLASS = BLAST_MODELS[chemistry][index][1]
 
 
 def set_fade_run(scalar: float, eol: float, efficiency=None):
@@ -1130,7 +1124,7 @@ class BatteryFade:
         return float(self.cell.outputs['q'][-1])
 
     def begin_year(self, y):
-        t = self._replacement_time(float(y))
+        t = self._eol_time
         self.new_battery = (y == 0)
         if y > 0 and t is not None:
             self.installs.append(t)
@@ -1145,11 +1139,8 @@ class BatteryFade:
             return 0.5 * capacity_y
         return min(max(carried_kwh, (1 - BATTERY_DOD) * capacity_y), capacity_y)
 
-    def _replacement_time(self, now):
-        return self._eol_time
-
     def finish(self):
-        t = self._replacement_time(float(HORIZON_YEARS))
+        t = self._eol_time
         if t is not None and t < HORIZON_YEARS - 1e-6:
             self.installs.append(t)
             self._eol_time = None
@@ -1275,10 +1266,10 @@ def get_sensitivity_scope(scenarios, weather_cases, impact_labels):
     return chosen_combos, chosen_labels
 
 
-def get_battery_capacity_for_optimization():
+def get_battery_capacity():
     while True:
         try:
-            capacity = float(input("Enter battery capacity in kWh (for operation optimization): ").strip())
+            capacity = float(input("Enter battery capacity in kWh: ").strip())
             if capacity > 0:
                 return capacity
         except ValueError:
@@ -1319,16 +1310,6 @@ def get_basic_strategy_capacity_choice():
             pass
 
 
-_timestamp_cache = {}
-
-
-def _needs_timestamps():
-    if 'ts' not in _timestamp_cache:
-        original_df = pd.read_excel(needs_file_current, sheet_name="current", engine="openpyxl")
-        _timestamp_cache['ts'] = pd.to_datetime(original_df.iloc[:HOURS_PER_YEAR, 0])
-    return _timestamp_cache['ts']
-
-
 def simulate_battery_storage_full(needs_df, battery_capacity, return_soc=False, initial_soc_kwh=None):
     if battery_capacity is None or battery_capacity == 0:
         grid_import_no_battery = calculate_net_grid_import_without_battery(needs_df)
@@ -1336,16 +1317,14 @@ def simulate_battery_storage_full(needs_df, battery_capacity, return_soc=False, 
                 calculate_exports_without_battery(needs_df))
 
     df = needs_df.copy()
-    df["timestamp"] = _needs_timestamps()
     df["load_kWh"] = df.iloc[:, 0:5].sum(axis=1)
     df["pv_kWh"]   = -df.iloc[:, 5]
     generation     = df["pv_kWh"]
 
-    Hbat_dur    = 2
     Rbat        = BATTERY_EFFICIENCY
     DODbat      = BATTERY_DOD
     single_eff  = (Rbat ** 0.5)
-    max_power   = battery_capacity / Hbat_dur
+    max_power   = battery_capacity / BATTERY_DURATION_H
     min_soc     = (1 - DODbat) * battery_capacity
     initial_soc = 0.5 * battery_capacity
     if initial_soc_kwh is not None:
@@ -1393,10 +1372,6 @@ def simulate_battery_storage_full(needs_df, battery_capacity, return_soc=False, 
         export_list.append(export_kWh)
 
     annual_cycle_count = 0.5 * cumulative_throughput / usable_capacity if usable_capacity > 0 else 0
-    df["battery_charge_kWh"]    = charge_list
-    df["battery_discharge_kWh"] = discharge_list
-    df["storage_content_kWh"]   = soc_list
-    df["grid_import_kWh"]       = grid_import_list
     if return_soc:
         idle = [(ch <= STANDBY_IDLE_TOL_KWH and dis <= STANDBY_IDLE_TOL_KWH)
                 for ch, dis in zip(charge_list, discharge_list)]
@@ -1514,7 +1489,7 @@ def _write_future_sweep_sheet(writer, scenario, sheet_name, tests, output_labels
             installs, cycle_cols = _schedule_columns(test_data['cycles_by_year'], CYCLE_YEARS_FUT,
                                                      test_data['installs'])
             mods = calculate_embodied_impacts(
-                capacity * BATTERY_KG_PER_KWH, scenario, None, install_times=installs,
+                capacity * BATTERY_KG_PER_KWH, scenario, install_times=installs,
                 inverter_kw=capacity / BATTERY_DURATION_H)
         else:
             operational_impacts = calculate_future_impacts(*test_data['grid_imports'], impacts_df)
@@ -1741,7 +1716,7 @@ def _build_single_result_df(operational_results, capacity_to_use, cycles_by_year
         battery_mass = capacity_to_use * BATTERY_KG_PER_KWH
         installs, sched_cols = _schedule_columns(cycles_by_year, cycle_years, installs)
         embodied_modules = calculate_embodied_impacts(
-            battery_mass, scenario, None, install_times=installs,
+            battery_mass, scenario, install_times=installs,
             inverter_kw=capacity_to_use / BATTERY_DURATION_H)
 
         df['Embodied Impact (60 years)'] = pd.Series(embodied_modules['total'])
@@ -1830,21 +1805,20 @@ if battery_choice == 2:
 
     capacity_choice = get_basic_strategy_capacity_choice()
     if capacity_choice == 1:
-        battery_capacity_input         = get_battery_capacity_for_optimization()
+        battery_capacity_input         = get_battery_capacity()
         basic_strategy_test_capacities = False
     else:
         basic_strategy_test_capacities = True
 
 use_battery = battery_choice > 1
 
-fade_on = use_battery
-if fade_on:
+if use_battery:
     set_fade_model(BATTERY_CHEMISTRY, get_fade_model_choice(BATTERY_CHEMISTRY))
 _, SCENARIOS_TO_RUN = get_scenario_selection()
 ALL_WEATHER = get_weather_choice()
 ALL_COMBOS  = [(s, w) for s in SCENARIOS_TO_RUN for w in ALL_WEATHER]
 sens_combos, sens_labels = ALL_COMBOS, list(labels)
-if fade_on:
+if use_battery:
     runs = get_fade_runs()
     if any(r['sensitivity'] for r in runs):
         sens_combos, sens_labels = get_sensitivity_scope(SCENARIOS_TO_RUN, ALL_WEATHER, labels)
@@ -1854,7 +1828,7 @@ else:
 chem_suffix = f"_{BATTERY_CHEMISTRY}" if (use_battery and BATTERY_CHEMISTRY != "LFP") else ""
 
 if use_battery:
-    initialize_future_calculator(BATTERIES_FOLDER)
+    initialise_future_calculator(BATTERIES_FOLDER)
 
 
 def run_current_weather(run_suffix, combos, output_labels):
@@ -1872,7 +1846,7 @@ def run_current_weather(run_suffix, combos, output_labels):
     for scenario in scenarios_to_process:
         impacts_df = load_impacts_for_scenario(scenario)
 
-        if fade_on and not basic_strategy_test_capacities:
+        if use_battery and not basic_strategy_test_capacities:
             fr = simulate_60years_with_fade((needs_current,), battery_capacity_input, "current")
             fade_current[scenario] = fr
             cycle_counts_current[scenario] = float(np.mean(fr['cycles']))
@@ -1954,7 +1928,7 @@ def run_current_weather(run_suffix, combos, output_labels):
                         if capacity > 0:
                             battery_mass = capacity * BATTERY_KG_PER_KWH
                             mods = calculate_embodied_impacts(
-                                battery_mass, scenario, None, install_times=installs,
+                                battery_mass, scenario, install_times=installs,
                                 inverter_kw=capacity / BATTERY_DURATION_H)
 
                             embodied_value = mods['total'][label]
@@ -2048,7 +2022,7 @@ def run_future_weather(run_suffix, combos, output_labels):
         cycles_by_year_med[scenario]  = [0] * 60
         cycles_by_year_high[scenario] = [0] * 60
 
-        if fade_on and not basic_strategy_test_capacities:
+        if use_battery and not basic_strategy_test_capacities:
             for weather_key, needs_periods, results, module_d, cycles, installs in (
                     ("medium", (needs_2020s_med, needs_2050s_med, needs_2080s_med),
                      future_results_med, module_d_results_med, cycles_by_year_med, installs_med),
@@ -2152,7 +2126,7 @@ for run in runs:
         output_future = run_future_weather(run_suffix, combos, output_labels)
 
     output_fade = None
-    if fade_on and _fade_cache:
+    if use_battery and _fade_cache:
         fade_rows = []
         for (weather_key, capacity, *_), fr in _fade_cache.items():
             for row in fr['rows']:
