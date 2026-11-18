@@ -1,6 +1,9 @@
 import pandas as pd
 import string
 import os
+import sys
+import types
+import warnings
 import numpy as np
 from openpyxl.utils import column_index_from_string
 import math
@@ -18,7 +21,6 @@ N_YEARS_2050S    = 30
 N_YEARS_2080S    = 4
 CYCLE_YEARS      = list(range(2025, 2051))
 CYCLE_YEARS_FUT  = list(range(2025, 2085))
-CYCLE_YEAR_COLS  = [f"Cycles {y}" for y in CYCLE_YEARS]
 
 
 class FutureImpactsCalculator:
@@ -480,7 +482,6 @@ class FutureImpactsCalculator:
                         'PL', 'PT', 'RO', 'SE', 'SI', 'SK']
 
         for item in regions_data:
-            region = item['region']
             base_region = item['base_region']
             voltage = item['voltage']
             amount_mj = item['amount_mj']
@@ -847,15 +848,15 @@ BATTERY_CHEMISTRIES = {
 def set_battery_chemistry(name: str):
     global BATTERY_CHEMISTRY, BATTERY_KG_PER_KWH
     global BATTERY_EFFICIENCY, BATTERY_DOD
-    global a1a3_factors, b4_factors, c_factors
+    global a1a3_factors, b4_factors_baseline, c_factors_baseline
     c = BATTERY_CHEMISTRIES[name]
     BATTERY_CHEMISTRY     = name
     BATTERY_KG_PER_KWH    = c["kg_per_kwh"]
     BATTERY_EFFICIENCY    = c["efficiency"]
     BATTERY_DOD           = c["dod"]
     a1a3_factors          = c["a1a3"]
-    b4_factors            = {"BASELINE": c["b4_baseline"]}
-    c_factors             = {"BASELINE": c["c_baseline"]}
+    b4_factors_baseline   = c["b4_baseline"]
+    c_factors_baseline    = c["c_baseline"]
 
 
 set_battery_chemistry("LFP")
@@ -904,7 +905,7 @@ _battery_future_calculator: FutureImpactsCalculator = None
 _future_impacts_cache: dict = {}
 
 
-def initialize_future_calculator(batteries_folder: str):
+def initialise_future_calculator(batteries_folder: str):
     global _battery_future_calculator
     if _battery_future_calculator is None:
         _battery_future_calculator = FutureImpactsCalculator(batteries_folder)
@@ -924,12 +925,8 @@ def _get_future_module_per_kg(year: int, scenario: str, module: str) -> dict:
     return per_kg
 
 
-def calculate_embodied_impacts(battery_mass: float, scenario: str,
-                                      battery_lifetime_years: float, install_times=None,
-                                      inverter_kw: float = 0.0) -> dict:
-    if install_times is None:
-        batteries_needed = math.ceil(round(60 / battery_lifetime_years, 9))
-        install_times = [k * battery_lifetime_years for k in range(batteries_needed)]
+def calculate_embodied_impacts(battery_mass: float, scenario: str, install_times,
+                               inverter_kw: float = 0.0) -> dict:
     batteries_needed = len(install_times)
 
     total    = {label: 0.0 for label in labels}
@@ -963,7 +960,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str,
         if n < batteries_needed:
             if scenario == "BASELINE":
                 for i, label in enumerate(labels):
-                    b4_val = battery_mass * b4_factors["BASELINE"][i]
+                    b4_val = battery_mass * b4_factors_baseline[i]
                     mod_b4[label] += b4_val
                     total[label]  += b4_val
             else:
@@ -975,7 +972,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str,
 
         if scenario == "BASELINE":
             for i, label in enumerate(labels):
-                c_val = battery_mass * c_factors["BASELINE"][i]
+                c_val = battery_mass * c_factors_baseline[i]
                 mod_c[label] += c_val
                 total[label] += c_val
         else:
@@ -1066,13 +1063,9 @@ BLAST_MODELS = {
                ("Sony-Murata 2.5 Ah NCA-GrSi",     "NCA_GrSi_SonyMurata2p5Ah_Battery")],
 }
 
-FADE_MODEL_NAME, FADE_MODEL_CLASS = BLAST_MODELS["LFP"][0]
+FADE_MODEL_CLASS = BLAST_MODELS["LFP"][0][1]
 FADE_SCALAR = 1.0
 FADE_EOL    = FADE_EOL_DEFAULT
-
-import sys
-import types
-import warnings
 
 try:
     import h5pyd
@@ -1085,8 +1078,8 @@ from blast.utils.rainflow import extract_cycles as blast_extract_cycles
 
 
 def set_fade_model(chemistry: str, index: int = 0):
-    global FADE_MODEL_NAME, FADE_MODEL_CLASS
-    FADE_MODEL_NAME, FADE_MODEL_CLASS = BLAST_MODELS[chemistry][index]
+    global FADE_MODEL_CLASS
+    FADE_MODEL_CLASS = BLAST_MODELS[chemistry][index][1]
 
 
 def set_fade_run(scalar: float, eol: float, efficiency=None):
@@ -1124,7 +1117,7 @@ class BatteryFade:
         return float(self.cell.outputs['q'][-1])
 
     def begin_year(self, y):
-        t = self._replacement_time(float(y))
+        t = self._eol_time
         self.new_battery = (y == 0)
         if y > 0 and t is not None:
             self.installs.append(t)
@@ -1139,11 +1132,8 @@ class BatteryFade:
             return 0.5 * capacity_y
         return min(max(carried_kwh, (1 - BATTERY_DOD) * capacity_y), capacity_y)
 
-    def _replacement_time(self, now):
-        return self._eol_time
-
     def finish(self):
-        t = self._replacement_time(float(HORIZON_YEARS))
+        t = self._eol_time
         if t is not None and t < HORIZON_YEARS - 1e-6:
             self.installs.append(t)
             self._eol_time = None
@@ -1270,6 +1260,8 @@ def get_sensitivity_scope(scenarios, weather_cases, impact_labels):
 
 
 base_path = "/Users/yourname/Downloads/hourly files/"
+OUTPUT_FOLDER = "/Users/yourname/Downloads/"
+BATTERIES_FOLDER = "/Users/yourname/Downloads/Future_impacts_calculator_Batteries/"
 needs_file_current = os.path.join(base_path, "your building's hourly needs.xlsx")
 needs_file_future  = os.path.join(base_path, "your building's hourly needs.xlsx")
 
@@ -1313,42 +1305,6 @@ def load_impacts_for_scenario(scenario):
     return impacts_df.apply(pd.to_numeric, errors='coerce')
 
 
-def calculate_current_impacts(grid_imports, impacts_df):
-    results = {}
-    years_variable = 26
-    years_repeated = 34
-
-    slice_variable_impacts = slice(0, HOURS_PER_YEAR * years_variable)
-    slice_repeated_impacts = slice(
-        HOURS_PER_YEAR * (years_variable - 1),
-        HOURS_PER_YEAR * years_variable
-    )
-
-    grid_import_repeated = pd.concat(
-        [grid_imports.reset_index(drop=True)] * years_variable,
-        ignore_index=True
-    )
-
-    for i, label in enumerate(labels):
-        impacts_variable = (
-            impacts_df.iloc[slice_variable_impacts, i]
-            .reset_index(drop=True)
-        )
-        min_length = min(len(grid_import_repeated), len(impacts_variable))
-        col_sum_variable = (
-            grid_import_repeated.iloc[:min_length].to_numpy()
-            * impacts_variable.iloc[:min_length].to_numpy()
-        ).sum()
-        col_sum_repeated = (
-            grid_imports.reset_index(drop=True).to_numpy()
-            * impacts_df.iloc[slice_repeated_impacts, i]
-              .reset_index(drop=True).to_numpy()
-        ).sum() * years_repeated
-        results[label] = col_sum_variable + col_sum_repeated
-
-    return results
-
-
 def calculate_current_impacts_by_year(imports_by_year, impacts_df):
     results = {}
     if len(imports_by_year) == N_VARIABLE_YEARS + N_REPEATED_YEARS:
@@ -1389,29 +1345,20 @@ def calculate_module_d_by_year(exports_by_year, impacts_df):
     return {label: -value for label, value in d.items()}
 
 
-def calculate_operational_impact_1year(grid_imports, grid_impacts_data, impact_index):
-    impact_factors = grid_impacts_data.iloc[:HOURS_PER_YEAR, impact_index]
-    return (grid_imports.reset_index(drop=True).to_numpy() *
-            impact_factors.reset_index(drop=True).to_numpy()).sum()
-
-
-def optimise_year_milp(needs_data, grid_impacts_data, impact_index,
-                                                   scenario_type, time_period, use_solver_options,
-                                                   battery_capacity, annual_embodied_impact=0,
-                                                   return_soc=False, initial_soc_kwh=None):
+def optimise_year_milp(needs_data, grid_impacts_data, impact_index, battery_capacity,
+                      annual_embodied_impact=0, return_soc=False, initial_soc_kwh=None):
 
     if battery_capacity == 0:
         return (pd.Series(calculate_net_grid_import_without_battery(needs_data)), 0,
                 calculate_exports_without_battery(needs_data))
 
-    Hbat_dur   = 2
     Rbat        = BATTERY_EFFICIENCY
     DODbat      = BATTERY_DOD
     min_soc     = (1 - DODbat) * battery_capacity
     initial_soc = 0.5 * battery_capacity
     if initial_soc_kwh is not None:
         initial_soc = initial_soc_kwh
-    max_power   = battery_capacity / Hbat_dur
+    max_power   = battery_capacity / BATTERY_DURATION_H
     total_hours = HOURS_PER_YEAR
     needs = needs_data
     impact_factors = grid_impacts_data.iloc[:HOURS_PER_YEAR, impact_index]
@@ -1456,18 +1403,14 @@ def optimise_year_milp(needs_data, grid_impacts_data, impact_index,
     model.objective = Objective(rule=integrated_objective, sense=minimize)
 
     solver = SolverFactory('gurobi')
-    opts = ({'TimeLimit': 50, 'MIPGap': 0.01, 'Threads': SOLVER_THREADS, 'Presolve': 2, 'Cuts': 2}
-            if use_solver_options else
-            {'MIPGap': 0.01, 'Threads': SOLVER_THREADS})
-    results = solver.solve(model, tee=False, options=opts)
+    results = solver.solve(model, tee=False, options={'MIPGap': 0.01, 'Threads': SOLVER_THREADS})
 
     tc = results.solver.termination_condition
-    accepted = (TerminationCondition.optimal, TerminationCondition.feasible,
-                TerminationCondition.maxTimeLimit)
+    accepted = (TerminationCondition.optimal, TerminationCondition.feasible)
     if tc not in accepted or model.grid_import[0].value is None:
         raise RuntimeError(f"Gurobi failed at {battery_capacity:.1f} kWh: {tc}")
 
-    optimized = []
+    optimised = []
     charges, discharges = [], []
     throughput = 0
     for t in range(total_hours):
@@ -1476,7 +1419,7 @@ def optimise_year_milp(needs_data, grid_impacts_data, impact_index,
         throughput += ch + dis
         charges.append(ch)
         discharges.append(dis)
-        optimized.append(model.grid_import[t].value or 0)
+        optimised.append(model.grid_import[t].value or 0)
     usable = battery_capacity - min_soc
     cycles = 0.5 * throughput / usable if usable > 0 else 0
 
@@ -1488,12 +1431,12 @@ def optimise_year_milp(needs_data, grid_impacts_data, impact_index,
         soc_values = [model.soc[t].value for t in range(total_hours)]
         idle = [(ch <= STANDBY_IDLE_TOL_KWH and dis <= STANDBY_IDLE_TOL_KWH)
                 for ch, dis in zip(charges, discharges)]
-        return pd.Series(optimized), cycles, pd.Series(exports), soc_values, idle
-    return pd.Series(optimized), cycles, pd.Series(exports)
+        return pd.Series(optimised), cycles, pd.Series(exports), soc_values, idle
+    return pd.Series(optimised), cycles, pd.Series(exports)
 
 
 def optimise_all_years_with_fade(needs_data, impacts_df, impact_index, capacity,
-                                 use_solver_options, electricity_scenario, extra_needs=None):
+                                 electricity_scenario, extra_needs=None):
     year_dfs = [impacts_df.iloc[y * HOURS_PER_YEAR:(y + 1) * HOURS_PER_YEAR]
                 for y in range(N_VARIABLE_YEARS)]
     fade = BatteryFade()
@@ -1508,11 +1451,9 @@ def optimise_all_years_with_fade(needs_data, impacts_df, impact_index, capacity,
         else:
             needs_y = extra_needs[1]
         df_y = year_dfs[0] if electricity_scenario == "BASELINE" else year_dfs[min(y, N_VARIABLE_YEARS - 1)]
-        period = "current" if extra_needs is None else "future"
         start = fade.start_energy(capacity * q, carried)
         r = optimise_year_milp(
-            needs_y, df_y, impact_index, period, period, use_solver_options,
-            capacity * q, return_soc=True, initial_soc_kwh=start)
+            needs_y, df_y, impact_index, capacity * q, return_soc=True, initial_soc_kwh=start)
         fade.end_year(y, np.asarray(r[3], dtype=float) / (capacity * q), r[1],
                       start_fraction=start / (capacity * q))
         carried = float(r[3][-1])
@@ -1524,8 +1465,7 @@ def optimise_all_years_with_fade(needs_data, impacts_df, impact_index, capacity,
 
 
 def optimise_capacity_sweep(needs_data, grid_impacts_data, impact_index,
-                                         scenario_type, time_period, use_solver_options,
-                                         electricity_scenario, avg_demand, extra_needs=None):
+                            electricity_scenario, avg_demand, extra_needs=None):
 
     capacities_to_test = [i * avg_demand for i in range(0, 25)]
 
@@ -1556,9 +1496,9 @@ def optimise_capacity_sweep(needs_data, grid_impacts_data, impact_index,
             imports_by_year, cycles_by_year, exports_by_year, installs, fade_rows = \
                 optimise_all_years_with_fade(
                     needs_data, grid_impacts_data, impact_index, test_capacity,
-                    use_solver_options, electricity_scenario, extra_needs)
+                    electricity_scenario, extra_needs)
             embodied = calculate_embodied_impacts(
-                battery_mass, electricity_scenario, None, install_times=installs,
+                battery_mass, electricity_scenario, install_times=installs,
                 inverter_kw=test_capacity / BATTERY_DURATION_H)
             emb_total = embodied['total'][labels[impact_index]]
 
@@ -1600,14 +1540,14 @@ EXCLUDED_IMPACTS = [
 ]
 
 
-def run_optimisation(electricity_scenario, use_solver_options, weather="current", impact_filter=None):
+def run_optimisation(electricity_scenario, weather="current", impact_filter=None):
 
     excluded_impacts = EXCLUDED_IMPACTS
 
-    impact_indices_to_optimize = [i for i, l in enumerate(labels) if l not in excluded_impacts]
+    impact_indices_to_optimise = [i for i, l in enumerate(labels) if l not in excluded_impacts]
     if impact_filter is not None:
-        impact_indices_to_optimize = [i for i in impact_indices_to_optimize if labels[i] in impact_filter]
-    impact_labels_to_optimize  = [labels[i] for i in impact_indices_to_optimize]
+        impact_indices_to_optimise = [i for i in impact_indices_to_optimise if labels[i] in impact_filter]
+    impact_labels_to_optimise  = [labels[i] for i in impact_indices_to_optimise]
 
 
     if weather == "current":
@@ -1622,13 +1562,12 @@ def run_optimisation(electricity_scenario, use_solver_options, weather="current"
 
     batch_results = {}
 
-    for idx, impact_idx in enumerate(impact_indices_to_optimize):
-        label = impact_labels_to_optimize[idx]
+    for idx, impact_idx in enumerate(impact_indices_to_optimise):
+        label = impact_labels_to_optimise[idx]
 
         grid_import_current, total_cycle_count, optimal_capacity, all_test_results = \
             optimise_capacity_sweep(
                 needs_current, impacts_df, impact_idx,
-                weather, weather, use_solver_options,
                 electricity_scenario, avg_demand_current, extra_needs
             )
 
@@ -1639,7 +1578,7 @@ def run_optimisation(electricity_scenario, use_solver_options, weather="current"
             'all_test_results': all_test_results
         }
 
-    return batch_results, impact_labels_to_optimize, avg_demand_current
+    return batch_results, impact_labels_to_optimise, avg_demand_current
 
 
 def save_results(batch_results, impact_labels, electricity_scenario, avg_demand_current, weather="current",
@@ -1647,15 +1586,13 @@ def save_results(batch_results, impact_labels, electricity_scenario, avg_demand_
     chem_prefix = "" if BATTERY_CHEMISTRY == "LFP" else f"{BATTERY_CHEMISTRY}_"
     tag = f"_{run_tag}" if run_tag else ""
     if weather == "current":
-        file_name = f"batch_optimization_{chem_prefix}{electricity_scenario}_current{tag}.xlsx"
+        file_name = f"batch_optimisation_{chem_prefix}{electricity_scenario}_current{tag}.xlsx"
         cycle_years = CYCLE_YEARS
     else:
-        file_name = f"batch_optimization_{chem_prefix}{electricity_scenario}_future_{weather.upper()}{tag}.xlsx"
+        file_name = f"batch_optimisation_{chem_prefix}{electricity_scenario}_future_{weather.upper()}{tag}.xlsx"
         cycle_years = CYCLE_YEARS_FUT
     cycle_year_cols = [f"Cycles {y}" for y in cycle_years]
-    output_file = os.path.join("/Users/yourname/Downloads/", file_name)
-
-    impacts_df = load_impacts_for_scenario(electricity_scenario)
+    output_file = os.path.join(OUTPUT_FOLDER, file_name)
 
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
 
@@ -1800,13 +1737,6 @@ def get_weather_choice():
     return (["current"] if choice == "3" else []) + future[sub]
 
 
-def get_solver_options_choice():
-    while True:
-        c = input("Use solver time limits and optimality gap? (yes/no): ").strip().lower()
-        if c in ('yes', 'y', 'no', 'n'):
-            return c in ('yes', 'y')
-
-
 def get_scenario_selection():
     print("\nSelect electricity scenario(s) for optimisation:")
     for idx, s in enumerate(["BASELINE", "FS", "ST", "CT", "LW", "ALL SCENARIOS"], 1):
@@ -1842,7 +1772,6 @@ def main():
     set_fade_model(BATTERY_CHEMISTRY, get_fade_model_choice(BATTERY_CHEMISTRY))
     electricity_scenario, scenarios_to_run = get_scenario_selection()
     weather_cases = get_weather_choice()
-    use_solver_options = get_solver_options_choice()
 
     all_combos = [(s, w) for s in scenarios_to_run for w in weather_cases]
     sens_combos, sens_labels = all_combos, None
@@ -1855,8 +1784,7 @@ def main():
 
     non_baseline_scenarios = [s for s in scenarios_to_run if s != "BASELINE"]
     if non_baseline_scenarios:
-        batteries_folder = "/Users/yourname/Downloads/Future_impacts_calculator_Batteries/"
-        initialize_future_calculator(batteries_folder)
+        initialise_future_calculator(BATTERIES_FOLDER)
 
 
     for run in runs:
@@ -1867,8 +1795,7 @@ def main():
                 if run['sensitivity'] and (scenario, weather) not in sens_combos:
                     continue
                 batch_results, impact_labels, avg_demand = run_optimisation(
-                    scenario, use_solver_options, weather,
-                    sens_labels if run['sensitivity'] else None)
+                    scenario, weather, sens_labels if run['sensitivity'] else None)
 
                 save_results(
                     batch_results, impact_labels, scenario, avg_demand, weather, run['tag'])
