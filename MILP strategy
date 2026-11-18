@@ -1270,8 +1270,8 @@ def get_sensitivity_scope(scenarios, weather_cases, impact_labels):
 
 
 base_path = "/Users/yourname/Downloads/hourly files/"
-needs_file_current = os.path.join(base_path, "QPR hourly needs.xlsx")
-needs_file_future  = os.path.join(base_path, "QPR hourly needs.xlsx")
+needs_file_current = os.path.join(base_path, "your building's hourly needs.xlsx")
+needs_file_future  = os.path.join(base_path, "your building's hourly needs.xlsx")
 
 scenario_files = {
     "BASELINE": "BASELINE2 hourly_impacts.xlsx",
