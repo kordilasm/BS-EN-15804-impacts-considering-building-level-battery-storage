@@ -259,10 +259,7 @@ class FutureImpactsCalculator:
                         base_region = region.split('-')[0].strip() if '-' in region else region
                         amount = 0
                         if len(row) > 4 and pd.notna(row[4]):
-                            try:
-                                amount = float(row[4])
-                            except:
-                                amount = 0
+                            amount = float(row[4])
                         regions_data.append({
                             'region': region, 'base_region': base_region,
                             'voltage': voltage, 'amount_mj': amount, 'process': process
@@ -959,7 +956,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str, install_times
                 road = battery_mass * a4_road_factors_baseline[i] * (500 / 1000)
             else:
                 a4_road_per_kg = _get_future_module_per_kg(installation_year, scenario, "A4")
-                road = battery_mass * a4_road_per_kg.get(label, 0) * (500 / 1000)
+                road = battery_mass * a4_road_per_kg[label] * (500 / 1000)
 
             mod_a4[label] += ship + road
             total[label] += ship + road
@@ -973,7 +970,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str, install_times
             else:
                 b4_per_kg = _get_future_module_per_kg(replacement_year, scenario, "B4")
                 for label in labels:
-                    b4_val = battery_mass * b4_per_kg.get(label, 0)
+                    b4_val = battery_mass * b4_per_kg[label]
                     mod_b4[label] += b4_val
                     total[label]  += b4_val
 
@@ -985,7 +982,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str, install_times
         else:
             c_per_kg = _get_future_module_per_kg(c_year, scenario, "C")
             for label in labels:
-                c_val = battery_mass * c_per_kg.get(label, 0)
+                c_val = battery_mass * c_per_kg[label]
                 mod_c[label] += c_val
                 total[label] += c_val
 
@@ -1012,7 +1009,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str, install_times
                     road = inv_mass * a4_road_factors_baseline[i] * (500 / 1000)
                 else:
                     a4_road_per_kg = _get_future_module_per_kg(installation_year, scenario, "A4")
-                    road = inv_mass * a4_road_per_kg.get(label, 0) * (500 / 1000)
+                    road = inv_mass * a4_road_per_kg[label] * (500 / 1000)
                 mod_a4[label] += ship + road
                 total[label]  += ship + road
 
@@ -1025,7 +1022,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str, install_times
                 else:
                     b4_per_unit = _get_future_module_per_kg(replacement_year, scenario, "B4_inverter")
                     for label in labels:
-                        v = units * b4_per_unit.get(label, 0)
+                        v = units * b4_per_unit[label]
                         mod_b4[label] += v
                         total[label]  += v
 
@@ -1037,7 +1034,7 @@ def calculate_embodied_impacts(battery_mass: float, scenario: str, install_times
             else:
                 c_per_unit = _get_future_module_per_kg(c_year, scenario, "C_inverter")
                 for label in labels:
-                    v = units * c_per_unit.get(label, 0)
+                    v = units * c_per_unit[label]
                     mod_c[label] += v
                     total[label] += v
 
@@ -1076,7 +1073,7 @@ FADE_EOL    = FADE_EOL_DEFAULT
 
 try:
     import h5pyd
-except Exception:
+except ImportError:
     sys.modules["h5pyd"] = types.ModuleType("h5pyd")
 if not hasattr(np, "trapz"):
     np.trapz = np.trapezoid
@@ -1528,17 +1525,17 @@ def get_battery_adjusted_grid_import(needs_df, battery_choice=2, battery_capacit
 
 
 def safe_load_needs(needs_file, sheet_name):
-    tmp_df        = pd.read_excel(needs_file, sheet_name=sheet_name, engine="openpyxl")
-    expected_cols = ['B','C','D','E','F','H']
-    col_indices   = [column_index_from_string(c)-1 for c in expected_cols]
-    cols_data = []
-    for idx in col_indices:
-        if idx < len(tmp_df.columns):
-            col = tmp_df.iloc[:, idx].copy()
-        else:
-            col = pd.Series([0]*len(tmp_df))
-        cols_data.append(col)
-    return pd.concat(cols_data, axis=1).apply(pd.to_numeric, errors='coerce').fillna(0).iloc[:HOURS_PER_YEAR]
+    tmp_df = pd.read_excel(needs_file, sheet_name=sheet_name, engine="openpyxl")
+    expected_cols = ['B', 'C', 'D', 'E', 'F', 'H']
+    col_indices = [column_index_from_string(c) - 1 for c in expected_cols]
+    if max(col_indices) >= len(tmp_df.columns):
+        raise ValueError(f"{needs_file} [{sheet_name}] has {len(tmp_df.columns)} columns, expected at least {max(col_indices) + 1}")
+    out = pd.concat([tmp_df.iloc[:, idx] for idx in col_indices], axis=1).apply(pd.to_numeric, errors='coerce').iloc[:HOURS_PER_YEAR]
+    if len(out) < HOURS_PER_YEAR:
+        raise ValueError(f"{needs_file} [{sheet_name}] has {len(out)} rows, expected {HOURS_PER_YEAR}")
+    if out.isna().any().any():
+        raise ValueError(f"{needs_file} [{sheet_name}] contains non-numeric or empty cells in columns {expected_cols}")
+    return out
 
 
 def calculate_net_grid_import_without_battery(needs_df):
@@ -1671,7 +1668,10 @@ def load_impacts_for_scenario(scenario):
     impacts_file = os.path.join(base_path, scenario_files[scenario])
     impact_cols  = list(string.ascii_uppercase[1:26])
     impacts_df   = pd.read_excel(impacts_file, sheet_name="Sheet1", usecols=",".join(impact_cols), engine="openpyxl")
-    return impacts_df.apply(pd.to_numeric, errors='coerce')
+    impacts_df = impacts_df.apply(pd.to_numeric, errors='coerce')
+    if impacts_df.isna().any().any():
+        raise ValueError(f"{impacts_file} contains non-numeric or empty cells")
+    return impacts_df
 
 
 def calculate_exports_without_battery(needs_df):
