@@ -38,7 +38,6 @@ class FutureImpactsCalculator:
         iea_shares_path       = self.data_folder / "IEA_Generation_Shares.xlsx"
         iea_weo_shares_path   = self.data_folder / "IEA_WEO_Generation_Shares_Regions.xlsx"
         iea_global_path       = self.data_folder / "IEA GLO future impacts_for python.xlsx"
-        ar6_path              = self.data_folder / "AR6_Electricity_Shares for ISO countries.csv"
         eco_path              = self.data_folder / "Ecoinvent geographies.xlsx"
         iso_path              = self.data_folder / "ISO 3166 geographies.xlsx"
 
@@ -87,7 +86,6 @@ class FutureImpactsCalculator:
         for sheet in xl_global.sheet_names:
             self.iea_global[sheet] = xl_global.parse(sheet)
 
-        self.ar6_data = pd.read_csv(ar6_path)
 
         self.geographies = pd.read_excel(eco_path, sheet_name="Geographies")
         self.build_region_mappings()
@@ -139,21 +137,6 @@ class FutureImpactsCalculator:
             'Hydropower': 'Hydro - reservoir', 'Wind power': 'Wind - onshore',
             'Solar power': 'Solar', 'Coal without CCS': 'Coal', 'Gas without CCS': 'Gas',
             'Coal with CCS': 'Coal', 'Gas with CCS': 'Gas',
-        }
-
-        self.ar6_tech_mapping = {
-            'Secondary Energy|Electricity|Biomass': 'Biofuels',
-            'Secondary Energy|Electricity|Coal': 'Coal',
-            'Secondary Energy|Electricity|Gas': 'Gas',
-            'Secondary Energy|Electricity|Hydro': 'Hydro - reservoir',
-            'Secondary Energy|Electricity|Nuclear': 'Nuclear - PWR',
-            'Secondary Energy|Electricity|Solar|PV': 'Solar',
-            'Secondary Energy|Electricity|Solar': 'Solar',
-            'Secondary Energy|Electricity|Solar|CSP': 'Solar - thermal',
-            'Secondary Energy|Electricity|Wind|Offshore': 'Wind - offshore',
-            'Secondary Energy|Electricity|Wind|Onshore': 'Wind - onshore',
-            'Secondary Energy|Electricity|Geothermal': 'Geothermal',
-            'Secondary Energy|Electricity|Ocean': None
         }
 
         self.scenario_mapping = {
@@ -621,7 +604,7 @@ class FutureImpactsCalculator:
         return total_add
 
     def run_calculation(self, option, target_year, scenario,
-                        ar6_model=None, ar6_scenario=None, use_eu_for_eu=True,
+                        use_eu_for_eu=True,
                         simapro_filename="SimaPro impacts.xlsx",
                         subtract_filename="Impacts to subtract.xlsm"):
         if target_year < 2025:
