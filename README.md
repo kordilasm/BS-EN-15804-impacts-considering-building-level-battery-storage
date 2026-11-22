@@ -3,7 +3,7 @@ Open source Python tool for calculating the environmental impacts of building le
 
 Details on the analysis are provided in the associated publication:
 
-Kordilas M, Mumovic D, Schwartz Y, et al (2026a) Net benefits and burdens of PV battery storage systems in buildings: Lifecycle carbon and impacts beyond carbon under high temporal grid decarbonisation dynamics [under review]. Energy and Buildings
+Kordilas M, Mumovic D, Schwartz Y, et al (2026a) Net benefits and burdens of PV battery storage systems in buildings: Lifecycle carbon and impacts beyond carbon under high temporal grid decarbonisation and climate change dynamics [under review]. Energy and Buildings
 
 The tools integrate the "Future_impacts_calculator" from BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories for the embodied impacts of the battery and the inverter in future years, which is described in https://github.com/kordilasm/BS-EN-15804-impacts-considering-grid-decarbonisation-trajectories and peer reviewed in:
 
