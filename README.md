@@ -16,15 +16,14 @@ Download the complete "Future_impacts_calculator_Batteries" folder and store it 
 
 Files, as in the Future_impacts_calculator:
 
-Impacts per MJ of technology inventory.xlsx
-National Grid ESO scenarios.xlsx
-EU future impacts_for python.xlsx
-IEA_Generation_Shares.xlsx
-IEA_WEO_Generation_Shares_Regions.xlsx
-IEA GLO future impacts_for python.xlsx
-AR6_Electricity_Shares for ISO countries.csv
-Ecoinvent geographies.xlsx (sheet "Geographies")
-ISO 3166 geographies.xlsx
+- Impacts per MJ of technology inventory.xlsx
+- National Grid ESO scenarios.xlsx
+- EU future impacts_for python.xlsx
+- IEA_Generation_Shares.xlsx
+- IEA_WEO_Generation_Shares_Regions.xlsx
+- IEA GLO future impacts_for python.xlsx
+- Ecoinvent geographies.xlsx (sheet "Geographies")
+- ISO 3166 geographies.xlsx
 
 Battery and inverter files. For each module there is one pair of files, calculated for the process under consideration with SimaPro, using the default units:
 
