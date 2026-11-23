@@ -49,7 +49,7 @@ All lists follow the order of the 25 impact categories of BS EN 15804, which mak
 The inverter has the power of battery's capacity divided by 2 hours, is replaced every 12 years, and its values scale with the power divided by 2.5 kW (A4 scales with its mass of 7.4 kg/kW).
 
 Workflow:
-1. Download the repository and the "Future_impacts_calculator_Batteries" folder, and prepare the hourly files.
+1. Download the scripts and the "Future_impacts_calculator_Batteries" folder, and prepare the hourly files.
 2. Fill in the inventory data and set the paths in the script (base_path, OUTPUT_FOLDER, BATTERIES_FOLDER).
 3. Run the script. You should select:
 - the battery strategy and capacity (MSC or MILP); MILP takes approximately 85 hours for all optimisations and capacities, worth keeping that in mind
