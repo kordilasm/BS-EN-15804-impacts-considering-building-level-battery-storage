@@ -12,18 +12,7 @@ Marios Kordilas, Dejan Mumovic, Yair Schwartz, Rob Cooke, Smith Mordak, Zaid Cha
 Files needed
 1. Future_impacts_calculator_Batteries folder
 
-Download the complete "Future_impacts_calculator_Batteries" folder and store it locally in /Users/yourname/Downloads/Future_impacts_calculator_Batteries, and set BATTERIES_FOLDER in msc_battery_strategy.py and batteries_folder in main() of milp_battery_strategy.py to its path. The folder contains the files for the Battery and inverter.
-
-Files, as in the Future_impacts_calculator:
-
-- Impacts per MJ of technology inventory.xlsx
-- National Grid ESO scenarios.xlsx
-- EU future impacts_for python.xlsx
-- IEA_Generation_Shares.xlsx
-- IEA_WEO_Generation_Shares_Regions.xlsx
-- IEA GLO future impacts_for python.xlsx
-- Ecoinvent geographies.xlsx (sheet "Geographies")
-- ISO 3166 geographies.xlsx
+Download the complete "Future_impacts_calculator_Batteries" folder and store it locally in /Users/yourname/Downloads/Future_impacts_calculator_Batteries, and set BATTERIES_FOLDER in msc_battery_strategy.py and batteries_folder in main() of milp_battery_strategy.py to its path. 
 
 Battery and inverter files. For each module there is one pair of files, calculated for the process under consideration with SimaPro, using the default units:
 
